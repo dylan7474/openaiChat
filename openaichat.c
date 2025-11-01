@@ -14,6 +14,8 @@
 #include <curl/curl.h>
 #include <json-c/json.h>
 
+#include "config.h"
+
 /* *** MODIFIED FOR OPEN WEBUI *** */
 #define DEFAULT_OLLAMA_URL "http://127.0.0.1:3000/ollama/api/generate"
 #define SYSTEM_PROMPT                                                                                 \
@@ -58,10 +60,11 @@ static const char *get_ollama_url(void) {
 
 /* *** ADDED FOR OPEN WEBUI *** */
 static const char *get_webui_key(void) {
-    const char *env = getenv("WEBUI_API_KEY");
-    if (env && *env) {
-        return env;
+#ifdef WEBUI_API_KEY
+    if (WEBUI_API_KEY[0] != '\0') {
+        return WEBUI_API_KEY;
     }
+#endif
     return NULL;
 }
 
