@@ -1,0 +1,28 @@
+# Windows-specific makefile for building openaichat using MSYS2 or MinGW
+
+# Allow overriding toolchain from the environment (e.g. CC=x86_64-w64-mingw32-gcc)
+CC ?= gcc
+PKG_CONFIG ?= pkg-config
+
+CFLAGS ?= -Wall -std=c99 -O2
+
+# Query pkg-config for required library flags
+CURL_CFLAGS := $(shell $(PKG_CONFIG) --cflags libcurl 2>/dev/null)
+JSON_C_CFLAGS := $(shell $(PKG_CONFIG) --cflags json-c 2>/dev/null)
+CURL_LIBS := $(shell $(PKG_CONFIG) --libs libcurl 2>/dev/null)
+JSON_C_LIBS := $(shell $(PKG_CONFIG) --libs json-c 2>/dev/null)
+
+TARGET = openaichat.exe
+SRC = openaichat.c
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) $(CURL_CFLAGS) $(JSON_C_CFLAGS) -o $(TARGET) $(SRC) $(CURL_LIBS) $(JSON_C_LIBS)
+	@echo "$(TARGET) has been compiled successfully."
+
+clean:
+	@echo "Cleaning up build files..."
+	rm -f $(TARGET)
