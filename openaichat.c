@@ -138,6 +138,40 @@ static const char *get_search_query_param(void) {
     return "q";
 }
 
+static int print_search_configuration(void) {
+    const char *endpoint = get_search_endpoint();
+    const char *api_key = get_search_api_key();
+    const char *header_name = get_search_header_name();
+    const char *query_param = get_search_query_param();
+
+    if (endpoint) {
+        printf("Web search is enabled.\n");
+        printf("Endpoint: %s\n", endpoint);
+        if (strstr(endpoint, "%s") == NULL) {
+            printf("Query parameter: %s\n", query_param);
+        } else {
+            printf("Endpoint already includes a placeholder for the query.\n");
+        }
+
+        if (api_key) {
+            printf("API key: [SET]\n");
+        } else {
+            printf("API key: (not provided)\n");
+        }
+
+        if (header_name) {
+            printf("Header override: %s\n", header_name);
+        } else {
+            printf("Header override: Authorization\n");
+        }
+
+        return EXIT_SUCCESS;
+    }
+
+    printf("Web search is disabled. Export AICHAT_SEARCH_URL to enable it.\n");
+    return EXIT_FAILURE;
+}
+
 static int is_search_configured(void) {
     return get_search_endpoint() != NULL;
 }
@@ -3522,7 +3556,12 @@ static void handle_client(int client_fd, const char *ollama_url) {
     free(request);
 }
 
-int main(void) {
+static void print_usage(const char *program_name) {
+    printf("Usage: %s [--check-search]\n", program_name ? program_name : "openaichat");
+    printf("  --check-search   Print the detected web search configuration and exit.\n");
+}
+
+int main(int argc, char *argv[]) {
     int server_fd = -1;
     struct sockaddr_in address;
     int opt = 1;
@@ -3534,6 +3573,22 @@ int main(void) {
     const char *ollama_url = get_ollama_url();
     /* *** ADDED FOR OPEN WEBUI *** */
     const char *api_key = get_webui_key();
+    const char *search_endpoint = NULL;
+    const char *search_header = NULL;
+    const char *search_param = NULL;
+
+    if (argc > 1) {
+        if (strcmp(argv[1], "--check-search") == 0) {
+            return print_search_configuration();
+        }
+        if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+            print_usage(argv[0]);
+            return EXIT_SUCCESS;
+        }
+        fprintf(stderr, "Unknown argument: %s\n", argv[1]);
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
 
     if (port_env && *port_env) {
         char *endptr = NULL;
@@ -3624,6 +3679,29 @@ int main(void) {
                 "WEBUI_API_KEY not set in config.h or the environment; continuing without authentication. Configure it if your server requires a token.\n");
     } else {
         printf("Using Open WebUI API Key: [SET]\n");
+    }
+
+    search_endpoint = get_search_endpoint();
+    search_header = get_search_header_name();
+    search_param = get_search_query_param();
+
+    if (search_endpoint) {
+        printf("Web search endpoint: %s\n", search_endpoint);
+        if (strstr(search_endpoint, "%s") == NULL && search_param) {
+            printf("Web search query parameter: %s\n", search_param);
+        }
+        if (get_search_api_key()) {
+            printf("Web search API key: [SET]\n");
+        } else {
+            printf("Web search API key: (not provided)\n");
+        }
+        if (search_header) {
+            printf("Web search header override: %s\n", search_header);
+        } else {
+            printf("Web search header override: Authorization\n");
+        }
+    } else {
+        fprintf(stderr, "Web search helper disabled. Set AICHAT_SEARCH_URL to enable research snippets.\n");
     }
 
 

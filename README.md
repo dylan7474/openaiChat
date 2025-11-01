@@ -58,6 +58,8 @@ sudo apt-get install -y \
   For example, if the Open WebUI interface lives at `http://127.0.0.1:8080/`, export `OLLAMA_URL=http://127.0.0.1:8080/ollama/api/generate`.
 * aiChat prints the derived model discovery URLs at startup. If model loading fails, copy the suggested `curl` command from the
   log or the UI diagnostics panel and run it from the same machine to confirm connectivity.
+* Run `./openaichat --check-search` to confirm the web search environment variables are visible before launching the server. The
+  command prints the resolved endpoint and exits with a non-zero status when search is disabled.
 * Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal where it is running.
 
 ### Web search integration
@@ -72,6 +74,8 @@ aiChat can enrich each turn with research notes pulled from a JSON web search AP
   default).
 * When search is configured, the diagnostics panel confirms the endpoint and the UI enables a **Use web search between turns**
   toggle. Each conversation prepends the fetched snippets to the prompt history and the transcript shows the resulting links.
+* You can also query aiChat directly from the command line with `curl http://127.0.0.1:4000/diagnostics` to view the same
+  configuration JSON that the browser uses.
 
 ## Using the web UI
 1. Browse to the printed URL after starting the server.
