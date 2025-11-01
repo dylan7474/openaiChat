@@ -138,11 +138,22 @@ static const char *get_search_query_param(void) {
     return "q";
 }
 
+static const char *get_search_user_agent(void) {
+    const char *env_value = getenv("AICHAT_SEARCH_UA");
+
+    if (has_visible_text(env_value)) {
+        return env_value;
+    }
+
+    return "Mozilla/5.0 (compatible; openaichat/1.0)";
+}
+
 static void describe_search_environment(void) {
     const char *endpoint = get_search_endpoint();
     const char *api_key = get_search_api_key();
     const char *header_name = get_search_header_name();
     const char *query_param = get_search_query_param();
+    const char *user_agent = get_search_user_agent();
 
     if (endpoint) {
         printf("Web search is enabled.\n");
@@ -163,6 +174,10 @@ static void describe_search_environment(void) {
             printf("Header override: %s\n", header_name);
         } else {
             printf("Header override: Authorization\n");
+        }
+
+        if (user_agent) {
+            printf("User-Agent: %s\n", user_agent);
         }
 
         return;
@@ -265,6 +280,7 @@ static int probe_search_endpoint(void) {
     const char *header_name = get_search_header_name();
     const char *query_param = get_search_query_param();
     const char *probe_query = "open webui search diagnostics";
+    const char *user_agent = get_search_user_agent();
     struct curl_slist *headers = NULL;
     struct MemoryStruct chunk = {.memory = NULL, .size = 0};
     CURL *curl = NULL;
@@ -306,6 +322,9 @@ static int probe_search_endpoint(void) {
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    if (user_agent && *user_agent) {
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent);
+    }
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
     if (headers) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -747,6 +766,7 @@ static int perform_web_search(const char *query, json_object **out_payload, char
     const char *api_key = get_search_api_key();
     const char *header_name = get_search_header_name();
     const char *query_param = get_search_query_param();
+    const char *user_agent = get_search_user_agent();
     struct curl_slist *headers = NULL;
     long status_code = 0;
     json_object *parsed = NULL;
@@ -812,6 +832,9 @@ static int perform_web_search(const char *query, json_object **out_payload, char
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    if (user_agent && *user_agent) {
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent);
+    }
 
     if (api_key && *api_key) {
         char header_buffer[512];
