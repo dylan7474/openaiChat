@@ -58,6 +58,13 @@ sudo apt-get install -y \
   For example, if the Open WebUI interface lives at `http://127.0.0.1:8080/`, export `OLLAMA_URL=http://127.0.0.1:8080/ollama/api/generate`.
 * aiChat prints the derived model discovery URLs at startup. If model loading fails, copy the suggested `curl` command from the
   log or the UI diagnostics panel and run it from the same machine to confirm connectivity.
+* Run `./openaichat --check-search` to confirm the web search environment variables are visible before launching the server. The
+  command prints the resolved endpoint and exits with a non-zero status when search is disabled.
+* Run `./openaichat --probe-search` to fire a sample query against the configured web search endpoint. The helper reports the HTTP
+  status, response size, and provides an equivalent `curl` command so you can retry the request manually.
+* Run `./openaichat --check-webui` to probe the derived Open WebUI API endpoints (including the fallback tags URL) without
+  starting the HTTP server. The tool lists which endpoints responded and how many models they returned so you can compare the
+  results with manual `curl` tests.
 * Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal where it is running.
 
 ### Web search integration
@@ -72,6 +79,10 @@ aiChat can enrich each turn with research notes pulled from a JSON web search AP
   default).
 * When search is configured, the diagnostics panel confirms the endpoint and the UI enables a **Use web search between turns**
   toggle. Each conversation prepends the fetched snippets to the prompt history and the transcript shows the resulting links.
+* You can also query aiChat directly from the command line with `curl http://127.0.0.1:4000/diagnostics` to view the same
+  configuration JSON that the browser uses.
+* Use `./openaichat --probe-search` to check connectivity from the host machine without starting the server. It prints
+  troubleshooting tips and a ready-to-copy `curl` command that mirrors aiChat's request headers.
 
 ## Using the web UI
 1. Browse to the printed URL after starting the server.
@@ -97,7 +108,9 @@ If the status indicator reports “Unable to load models from Open WebUI”, run
 2. Run the command from the machine hosting aiChat. A successful response should echo the Open WebUI model catalogue.
 3. Review the terminal where aiChat is running. Failed model discovery attempts now print the HTTP status or CURL error code
    along with reminder commands you can retry manually.
-4. Adjust `OLLAMA_URL` if needed so that it points at your deployment’s proxied `/ollama/api/generate` endpoint, then restart
+4. Run `./openaichat --check-webui` from the host where you compiled the binary to exercise the same endpoints without launching
+   the server. Successful requests echo the model count; failures repeat the `curl` tips printed during normal start-up.
+5. Adjust `OLLAMA_URL` if needed so that it points at your deployment’s proxied `/ollama/api/generate` endpoint, then restart
    aiChat. The `/diagnostics` endpoint (served by aiChat itself) also reports the currently configured URLs in JSON form.
 
 ## API reference

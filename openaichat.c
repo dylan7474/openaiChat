@@ -99,71 +99,253 @@ static char *append_to_history(char *history, const char *text);
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp);
 
 static const char *get_search_endpoint(void) {
-    static int initialised = 0;
-    static const char *cached = NULL;
-    const char *env_value = NULL;
+    const char *env_value = getenv("AICHAT_SEARCH_URL");
 
-    if (!initialised) {
-        env_value = getenv("AICHAT_SEARCH_URL");
-        if (has_visible_text(env_value)) {
-            cached = env_value;
-        }
-        initialised = 1;
+    if (has_visible_text(env_value)) {
+        return env_value;
     }
 
-    return cached;
+    return NULL;
 }
 
 static const char *get_search_api_key(void) {
-    static int initialised = 0;
-    static const char *cached = NULL;
-    const char *env_value = NULL;
+    const char *env_value = getenv("AICHAT_SEARCH_KEY");
 
-    if (!initialised) {
-        env_value = getenv("AICHAT_SEARCH_KEY");
-        if (has_visible_text(env_value)) {
-            cached = env_value;
-        }
-        initialised = 1;
+    if (has_visible_text(env_value)) {
+        return env_value;
     }
 
-    return cached;
+    return NULL;
 }
 
 static const char *get_search_header_name(void) {
-    static int initialised = 0;
-    static const char *cached = NULL;
-    const char *env_value = NULL;
+    const char *env_value = getenv("AICHAT_SEARCH_HEADER");
 
-    if (!initialised) {
-        env_value = getenv("AICHAT_SEARCH_HEADER");
-        if (has_visible_text(env_value)) {
-            cached = env_value;
-        }
-        initialised = 1;
+    if (has_visible_text(env_value)) {
+        return env_value;
     }
 
-    return cached;
+    return NULL;
 }
 
 static const char *get_search_query_param(void) {
-    static int initialised = 0;
-    static const char *cached = "q";
-    const char *env_value = NULL;
+    const char *env_value = getenv("AICHAT_SEARCH_PARAM");
 
-    if (!initialised) {
-        env_value = getenv("AICHAT_SEARCH_PARAM");
-        if (has_visible_text(env_value)) {
-            cached = env_value;
-        }
-        initialised = 1;
+    if (has_visible_text(env_value)) {
+        return env_value;
     }
 
-    return cached;
+    return "q";
+}
+
+static void describe_search_environment(void) {
+    const char *endpoint = get_search_endpoint();
+    const char *api_key = get_search_api_key();
+    const char *header_name = get_search_header_name();
+    const char *query_param = get_search_query_param();
+
+    if (endpoint) {
+        printf("Web search is enabled.\n");
+        printf("Endpoint: %s\n", endpoint);
+        if (strstr(endpoint, "%s") == NULL) {
+            printf("Query parameter: %s\n", query_param);
+        } else {
+            printf("Endpoint already includes a placeholder for the query.\n");
+        }
+
+        if (api_key) {
+            printf("API key: [SET]\n");
+        } else {
+            printf("API key: (not provided)\n");
+        }
+
+        if (header_name) {
+            printf("Header override: %s\n", header_name);
+        } else {
+            printf("Header override: Authorization\n");
+        }
+
+        return;
+    }
+
+    printf("Web search is disabled. Export AICHAT_SEARCH_URL to enable it.\n");
 }
 
 static int is_search_configured(void) {
     return get_search_endpoint() != NULL;
+}
+
+static int print_search_configuration(void) {
+    if (is_search_configured()) {
+        describe_search_environment();
+        return EXIT_SUCCESS;
+    }
+
+    describe_search_environment();
+    return EXIT_FAILURE;
+}
+
+static int append_api_key_header(struct curl_slist **headers, const char *header_name, const char *api_key) {
+    char header_buffer[512];
+    int written = 0;
+
+    if (!headers || !api_key) {
+        return 0;
+    }
+
+    if (!header_name || !*header_name) {
+        header_name = "Authorization";
+    }
+
+    written = snprintf(header_buffer, sizeof(header_buffer), "%s: %s", header_name, api_key);
+    if (written < 0 || written >= (int)sizeof(header_buffer)) {
+        fprintf(stderr, "Search API key is too long to fit in request header.\n");
+        return -1;
+    }
+
+    *headers = curl_slist_append(*headers, header_buffer);
+    if (!*headers) {
+        fprintf(stderr, "Failed to allocate curl header list.\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static char *build_search_probe_url(CURL *curl, const char *endpoint, const char *query_param, const char *query_text) {
+    char *escaped = NULL;
+    char *result = NULL;
+
+    if (!curl || !endpoint || !query_text) {
+        return NULL;
+    }
+
+    if (!query_param || !*query_param) {
+        query_param = "q";
+    }
+
+    escaped = curl_easy_escape(curl, query_text, 0);
+    if (!escaped) {
+        return NULL;
+    }
+
+    if (strstr(endpoint, "%s")) {
+        if (asprintf(&result, endpoint, escaped) == -1) {
+            result = NULL;
+        }
+    } else {
+        const char *separator = strchr(endpoint, '?') ? "&" : "?";
+        size_t needed = strlen(endpoint) + strlen(separator) + strlen(query_param) + 1 + strlen(escaped) + 1;
+        result = malloc(needed);
+        if (result) {
+            snprintf(result, needed, "%s%s%s=%s", endpoint, separator, query_param, escaped);
+        }
+    }
+
+    curl_free(escaped);
+    return result;
+}
+
+static void print_search_reproduction_tip(const char *request_url, const char *header_name, const char *api_key) {
+    if (!request_url) {
+        return;
+    }
+
+    printf("Reproduce with curl:\n");
+    if (api_key) {
+        printf("  curl -H \"%s: %s\" \"%s\"\n", header_name && *header_name ? header_name : "Authorization", api_key, request_url);
+    } else {
+        printf("  curl \"%s\"\n", request_url);
+    }
+}
+
+static int probe_search_endpoint(void) {
+    const char *endpoint = get_search_endpoint();
+    const char *api_key = get_search_api_key();
+    const char *header_name = get_search_header_name();
+    const char *query_param = get_search_query_param();
+    const char *probe_query = "open webui search diagnostics";
+    struct curl_slist *headers = NULL;
+    struct MemoryStruct chunk = {.memory = NULL, .size = 0};
+    CURL *curl = NULL;
+    CURLcode res = CURLE_OK;
+    long http_status = 0;
+    char *request_url = NULL;
+    int rc = EXIT_FAILURE;
+
+    if (!endpoint) {
+        describe_search_environment();
+        return EXIT_FAILURE;
+    }
+
+    chunk.memory = malloc(1);
+    if (!chunk.memory) {
+        fprintf(stderr, "Failed to allocate search response buffer.\n");
+        return EXIT_FAILURE;
+    }
+    chunk.size = 0;
+
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
+    if (!curl) {
+        fprintf(stderr, "Unable to initialise CURL for search probe.\n");
+        goto cleanup;
+    }
+
+    request_url = build_search_probe_url(curl, endpoint, query_param, probe_query);
+    if (!request_url) {
+        fprintf(stderr, "Failed to construct search request URL.\n");
+        goto cleanup;
+    }
+
+    if (api_key && append_api_key_header(&headers, header_name, api_key) != 0) {
+        goto cleanup;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, request_url);
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    if (headers) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    }
+
+    printf("Web search diagnostics\n");
+    printf("---------------------\n");
+    describe_search_environment();
+    printf("Probe query: '%s'\n", probe_query);
+    printf("Resolved request URL: %s\n", request_url);
+
+    res = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+
+    if (res == CURLE_OK && http_status >= 200 && http_status < 300) {
+        printf("[PASS] Search request succeeded with HTTP %ld and %zu byte%s in the response.\n",
+               http_status,
+               chunk.size,
+               chunk.size == 1 ? "" : "s");
+        print_search_reproduction_tip(request_url, header_name, api_key);
+        rc = EXIT_SUCCESS;
+    } else {
+        if (res != CURLE_OK) {
+            fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        } else {
+            fprintf(stderr, "Search request returned HTTP %ld.\n", http_status);
+        }
+        print_search_reproduction_tip(request_url, header_name, api_key);
+        printf("Review the curl output above to continue troubleshooting the search endpoint.\n");
+    }
+
+cleanup:
+    curl_slist_free_all(headers);
+    if (curl) {
+        curl_easy_cleanup(curl);
+    }
+    curl_global_cleanup();
+    free(request_url);
+    free(chunk.memory);
+    return rc;
 }
 
 static char *duplicate_and_normalise_text(const char *text) {
@@ -2222,7 +2404,7 @@ static const char *get_html_page(void) {
            "    const enableSearchInput = document.getElementById('enableSearch');\n"
            "    const searchToggleLabel = enableSearchInput ? enableSearchInput.closest('.form-toggle') : null;\n"
            "    const searchHelperEl = document.getElementById('searchHelper');\n"
-           "    const searchState = { configured: false, requested: false, active: false };\n"
+           "    const searchState = { configured: __SEARCH_CONFIGURED__, requested: false, active: false };\n"
            "    const MODEL_LOAD_ERROR_MESSAGE = 'Unable to load models from Open WebUI. Expand the troubleshooting tips below for commands you can try.';\n"
            "    const MODEL_LOAD_ERROR_KEY = 'model-load-error';\n"
            "    let diagnosticsInfo = null;\n"
@@ -2327,20 +2509,23 @@ static const char *get_html_page(void) {
            "      if (!diagnosticsDetailsEl) {\n"
            "        return;\n"
            "      }\n"
-           "      const info = diagnosticsInfo || {};\n"
-           "      const modelsUrl = typeof info.modelsUrl === 'string' ? info.modelsUrl.trim() : '';\n"
-           "      const fallbackUrl = typeof info.fallbackUrl === 'string' ? info.fallbackUrl.trim() : '';\n"
-           "      const endpoint = typeof info.webuiEndpoint === 'string' ? info.webuiEndpoint.trim() : '';\n"
-           "      const usesApiKey = Boolean(info.usesApiKey);\n"
-           "      const searchConfigured = Boolean(info.searchConfigured);\n"
-           "      const searchEndpoint = typeof info.searchEndpoint === 'string' ? info.searchEndpoint.trim() : '';\n"
-           "      const searchUsesKey = Boolean(info.searchUsesApiKey);\n"
+          "      const info = diagnosticsInfo || {};\n"
+          "      const modelsUrl = typeof info.modelsUrl === 'string' ? info.modelsUrl.trim() : '';\n"
+          "      const fallbackUrl = typeof info.fallbackUrl === 'string' ? info.fallbackUrl.trim() : '';\n"
+          "      const endpoint = typeof info.webuiEndpoint === 'string' ? info.webuiEndpoint.trim() : '';\n"
+          "      const usesApiKey = Boolean(info.usesApiKey);\n"
+          "      const hasSearchConfigured = Object.prototype.hasOwnProperty.call(info, 'searchConfigured');\n"
+          "      const searchConfigured = hasSearchConfigured ? Boolean(info.searchConfigured) : null;\n"
+          "      const searchEndpoint = typeof info.searchEndpoint === 'string' ? info.searchEndpoint.trim() : '';\n"
+          "      const searchUsesKey = Boolean(info.searchUsesApiKey);\n"
            "      const preferredUrl = modelsUrl || fallbackUrl;\n"
-           "      if (!searchState.active && enableSearchInput) {\n"
-           "        searchState.requested = enableSearchInput.checked;\n"
-           "      }\n"
-           "      searchState.configured = searchConfigured;\n"
-           "      updateSearchHelper();\n"
+          "      if (!searchState.active && enableSearchInput) {\n"
+          "        searchState.requested = enableSearchInput.checked;\n"
+          "      }\n"
+          "      if (hasSearchConfigured) {\n"
+          "        searchState.configured = searchConfigured;\n"
+          "      }\n"
+          "      updateSearchHelper();\n"
            "      if (diagnosticsSummaryEl) {\n"
            "        const parts = [];\n"
            "        if (modelsUrl) {\n"
@@ -2354,11 +2539,13 @@ static const char *get_html_page(void) {
            "        if (endpoint) {\n"
            "          parts.push(`Conversations will be sent to: ${endpoint}.`);\n"
            "        }\n"
-           "        if (searchConfigured) {\n"
-           "          parts.push(`Web search endpoint: ${searchEndpoint || 'configured via AICHAT_SEARCH_URL'}.`);\n"
-           "        } else {\n"
-           "          parts.push('Web search helper is disabled (set AICHAT_SEARCH_URL to enable it).');\n"
-           "        }\n"
+          "        if (hasSearchConfigured) {\n"
+          "          if (searchConfigured) {\n"
+          "            parts.push(`Web search endpoint: ${searchEndpoint || 'configured via AICHAT_SEARCH_URL'}.`);\n"
+          "          } else {\n"
+          "            parts.push('Web search helper is disabled (set AICHAT_SEARCH_URL to enable it).');\n"
+          "          }\n"
+          "        }\n"
            "        diagnosticsSummaryEl.textContent = parts.join(' ');\n"
            "      }\n"
            "      if (diagnosticsCurlEl) {\n"
@@ -2379,14 +2566,16 @@ static const char *get_html_page(void) {
            "      if (diagnosticsNotesEl) {\n"
            "        const targetHint = preferredUrl || endpoint || 'your Open WebUI host';\n"
            "        let notesText = `Run the command above from the machine hosting aiChat to confirm ${targetHint} is reachable. If it fails, adjust the OLLAMA_URL (currently ${endpoint || 'not set'}) or check your firewall.`;\n"
-           "        if (searchConfigured) {\n"
-           "          notesText += ` Web search calls ${searchEndpoint || 'the URL provided in AICHAT_SEARCH_URL'}.`;\n"
-           "          if (searchUsesKey) {\n"
-           "            notesText += ' Remember to export AICHAT_SEARCH_KEY for providers that require authentication.';\n"
-           "          }\n"
-           "        } else {\n"
-           "          notesText += ' Set AICHAT_SEARCH_URL to enable web research snippets between turns.';\n"
-           "        }\n"
+          "        if (hasSearchConfigured) {\n"
+          "          if (searchConfigured) {\n"
+          "            notesText += ` Web search calls ${searchEndpoint || 'the URL provided in AICHAT_SEARCH_URL'}.`;\n"
+          "            if (searchUsesKey) {\n"
+          "              notesText += ' Remember to export AICHAT_SEARCH_KEY for providers that require authentication.';\n"
+          "            }\n"
+          "          } else {\n"
+          "            notesText += ' Set AICHAT_SEARCH_URL to enable web research snippets between turns.';\n"
+          "          }\n"
+          "        }\n"
            "        diagnosticsNotesEl.textContent = notesText;\n"
            "      }\n"
            "    }\n"
@@ -3142,6 +3331,40 @@ static const char *get_html_page(void) {
            "</html>\n";
 }
 
+static char *render_html_page(void) {
+    const char *template = get_html_page();
+    const char *placeholder = "__SEARCH_CONFIGURED__";
+    const char *value = is_search_configured() ? "true" : "false";
+    const char *match = strstr(template, placeholder);
+    size_t template_len = strlen(template);
+
+    if (!match) {
+        char *copy = malloc(template_len + 1);
+        if (!copy) {
+            return NULL;
+        }
+        memcpy(copy, template, template_len + 1);
+        return copy;
+    }
+
+    size_t prefix_len = (size_t)(match - template);
+    size_t placeholder_len = strlen(placeholder);
+    size_t value_len = strlen(value);
+    size_t suffix_len = template_len - prefix_len - placeholder_len;
+    size_t result_len = prefix_len + value_len + suffix_len;
+    char *result = malloc(result_len + 1);
+
+    if (!result) {
+        return NULL;
+    }
+
+    memcpy(result, template, prefix_len);
+    memcpy(result + prefix_len, value, value_len);
+    memcpy(result + prefix_len + value_len, match + placeholder_len, suffix_len);
+    result[result_len] = '\0';
+    return result;
+}
+
 static int parse_int_header(const char *headers, const char *key) {
     const char *location = strcasestr(headers, key);
     if (!location) {
@@ -3480,7 +3703,13 @@ static void handle_client(int client_fd, const char *ollama_url) {
     }
 
     if (strcmp(method, "GET") == 0 && strcmp(path, "/") == 0) {
-        send_http_response(client_fd, "200 OK", "text/html; charset=UTF-8", get_html_page());
+        char *html = render_html_page();
+        if (!html) {
+            send_http_error(client_fd, "500 Internal Server Error", "Unable to render interface.");
+        } else {
+            send_http_response(client_fd, "200 OK", "text/html; charset=UTF-8", html);
+            free(html);
+        }
     } else if (strcmp(method, "GET") == 0 && strcmp(path, "/models") == 0) {
         handle_models_request(client_fd, ollama_url);
     } else if (strcmp(method, "GET") == 0 && strcmp(path, "/diagnostics") == 0) {
@@ -3506,7 +3735,87 @@ static void handle_client(int client_fd, const char *ollama_url) {
     free(request);
 }
 
-int main(void) {
+static int probe_models_endpoint(const char *label, const char *url) {
+    json_object *payload = NULL;
+    json_object *models = NULL;
+    char *error_message = NULL;
+    int rc = -1;
+
+    if (!url) {
+        printf("[SKIP] %s: endpoint not available.\n", label);
+        return -1;
+    }
+
+    printf("[TEST] %s\n", label);
+    printf("        %s\n", url);
+
+    rc = fetch_models_via_url(url, &payload, &error_message);
+    if (rc == 0) {
+        int model_count = 0;
+        if (json_object_object_get_ex(payload, "models", &models) &&
+            json_object_is_type(models, json_type_array)) {
+            model_count = (int)json_object_array_length(models);
+        }
+        printf("[PASS] Received %d model%s from %s.\n",
+               model_count,
+               model_count == 1 ? "" : "s",
+               label);
+        json_object_put(payload);
+        return 0;
+    }
+
+    printf("[FAIL] %s request failed: %s\n",
+           label,
+           error_message ? error_message : "see stderr for details");
+    if (error_message) {
+        free(error_message);
+    }
+    if (payload) {
+        json_object_put(payload);
+    }
+
+    return -1;
+}
+
+static int print_webui_diagnostics(void) {
+    const char *ollama_url = get_ollama_url();
+    const char *api_key = get_webui_key();
+    char *models_url = build_webui_models_url(ollama_url);
+    char *fallback_url = build_ollama_tags_url(ollama_url);
+    int success = 0;
+
+    printf("Open WebUI diagnostics\n");
+    printf("------------------------\n");
+    printf("Base URL: %s\n", ollama_url);
+    printf("API key: %s\n", api_key ? "[SET]" : "(not provided)");
+
+    if (probe_models_endpoint("Open WebUI models endpoint", models_url) == 0) {
+        success = 1;
+    }
+
+    if (probe_models_endpoint("Legacy Ollama fallback endpoint", fallback_url) == 0) {
+        success = 1;
+    }
+
+    if (!success) {
+        printf("No endpoints responded successfully. Review the error details above to continue troubleshooting.\n");
+    }
+
+    free(models_url);
+    free(fallback_url);
+
+    return success ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+static void print_usage(const char *program_name) {
+    printf("Usage: %s [--check-search] [--probe-search] [--check-webui]\n",
+           program_name ? program_name : "openaichat");
+    printf("  --check-search   Print the detected web search configuration and exit.\n");
+    printf("  --probe-search   Send a sample query to the search endpoint and report the result.\n");
+    printf("  --check-webui    Probe the Open WebUI API endpoints and exit.\n");
+}
+
+int main(int argc, char *argv[]) {
     int server_fd = -1;
     struct sockaddr_in address;
     int opt = 1;
@@ -3518,6 +3827,28 @@ int main(void) {
     const char *ollama_url = get_ollama_url();
     /* *** ADDED FOR OPEN WEBUI *** */
     const char *api_key = get_webui_key();
+    const char *search_endpoint = NULL;
+    const char *search_header = NULL;
+    const char *search_param = NULL;
+
+    if (argc > 1) {
+        if (strcmp(argv[1], "--check-search") == 0) {
+            return print_search_configuration();
+        }
+        if (strcmp(argv[1], "--probe-search") == 0) {
+            return probe_search_endpoint();
+        }
+        if (strcmp(argv[1], "--check-webui") == 0) {
+            return print_webui_diagnostics();
+        }
+        if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+            print_usage(argv[0]);
+            return EXIT_SUCCESS;
+        }
+        fprintf(stderr, "Unknown argument: %s\n", argv[1]);
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
 
     if (port_env && *port_env) {
         char *endptr = NULL;
@@ -3608,6 +3939,29 @@ int main(void) {
                 "WEBUI_API_KEY not set in config.h or the environment; continuing without authentication. Configure it if your server requires a token.\n");
     } else {
         printf("Using Open WebUI API Key: [SET]\n");
+    }
+
+    search_endpoint = get_search_endpoint();
+    search_header = get_search_header_name();
+    search_param = get_search_query_param();
+
+    if (search_endpoint) {
+        printf("Web search endpoint: %s\n", search_endpoint);
+        if (strstr(search_endpoint, "%s") == NULL && search_param) {
+            printf("Web search query parameter: %s\n", search_param);
+        }
+        if (get_search_api_key()) {
+            printf("Web search API key: [SET]\n");
+        } else {
+            printf("Web search API key: (not provided)\n");
+        }
+        if (search_header) {
+            printf("Web search header override: %s\n", search_header);
+        } else {
+            printf("Web search header override: Authorization\n");
+        }
+    } else {
+        fprintf(stderr, "Web search helper disabled. Set AICHAT_SEARCH_URL to enable research snippets.\n");
     }
 
 
