@@ -11,6 +11,7 @@ streams every reply back to the UI as soon as it is generated.
 * Discovers the available Open WebUI models at start-up and highlights if a previously selected model disappears.
 * Provides a built-in HTML interface served from `/`—no external assets or tooling required.
 * Exposes JSON endpoints so other tools can fetch the Open WebUI model list or trigger conversations programmatically.
+* Can optionally call a web search endpoint between turns and surface the snippets as research notes in the transcript.
 
 ## Prerequisites
 * A running Open WebUI instance reachable from the machine that launches aiChat. The default endpoint is
@@ -59,6 +60,19 @@ sudo apt-get install -y \
   log or the UI diagnostics panel and run it from the same machine to confirm connectivity.
 * Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal where it is running.
 
+### Web search integration
+
+aiChat can enrich each turn with research notes pulled from a JSON web search API:
+
+* Export `AICHAT_SEARCH_URL` with a URL template for your search provider. If the string contains `%s`, aiChat substitutes the
+  URL-encoded query. Otherwise it appends `?q=` (or the parameter in `AICHAT_SEARCH_PARAM`) automatically.
+* Optionally export `AICHAT_SEARCH_PARAM` to override the query parameter name when `%s` is not present in the URL template.
+* If the provider requires authentication, set `AICHAT_SEARCH_KEY`. aiChat sends it in the header named by
+  `AICHAT_SEARCH_HEADER` (default: `Authorization`, automatically prefixed with `Bearer` when the header is left at its
+  default).
+* When search is configured, the diagnostics panel confirms the endpoint and the UI enables a **Use web search between turns**
+  toggle. Each conversation prepends the fetched snippets to the prompt history and the transcript shows the resulting links.
+
 ## Using the web UI
 1. Browse to the printed URL after starting the server.
 2. Enter a topic and choose how many turns to run (the value is clamped between 1 and 12).
@@ -68,9 +82,10 @@ sudo apt-get install -y \
      button next to it.
    * Pick a model for each participant. aiChat fetches the list from `/models`; if a desired model disappears, the UI
      raises a warning and keeps the selection for when it returns.
-4. Press **Start conversation** to begin. Status messages above the form show whether aiChat is waiting on models, talking
+4. Toggle **Use web search between turns** when `AICHAT_SEARCH_URL` is configured to prepend research notes to each prompt.
+5. Press **Start conversation** to begin. Status messages above the form show whether aiChat is waiting on models, talking
    to Open WebUI, or complete, and the API indicator reports the connection state.
-5. Watch the transcript panel fill in as each response arrives. Messages show the speaker’s friendly name, chosen model,
+6. Watch the transcript panel fill in as each response arrives. Messages show the speaker’s friendly name, chosen model,
    and reply text.
 
 ## Troubleshooting Open WebUI connectivity
@@ -110,12 +125,14 @@ Starts a turn-based conversation. The request body must be JSON with the followi
   "participants": [
     { "name": "Astra", "model": "gemma:2b" },
     { "name": "Nova", "model": "llama3:8b" }
-  ]
+  ],
+  "enableSearch": true
 }
 ```
 
 `turns` is clamped between 1 and 12, and aiChat ignores participants without a model. Friendly names default to themed
-values (Astra, Nova, Cosmo, etc.) when omitted.
+values (Astra, Nova, Cosmo, etc.) when omitted. Set `enableSearch` to `true` to ask the server to query the configured
+`AICHAT_SEARCH_URL` before each reply and inject the returned snippets as research notes.
 
 Responses are streamed back as chunked NDJSON events (`application/x-ndjson`). Expect a sequence of objects with the
 following `type` values:
