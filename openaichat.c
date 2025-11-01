@@ -77,18 +77,18 @@ static int has_visible_text(const char *value) {
 }
 
 static const char *get_webui_key(void) {
-    const char *env_key = getenv("WEBUI_API_KEY");
-
-    if (has_visible_text(env_key)) {
-        return env_key;
-    }
-
 #ifdef WEBUI_API_KEY
     if (has_visible_text(WEBUI_API_KEY) &&
         strcmp(WEBUI_API_KEY, "your-real-api-key-goes-here") != 0) {
         return WEBUI_API_KEY;
     }
 #endif
+
+    const char *env_key = getenv("WEBUI_API_KEY");
+
+    if (has_visible_text(env_key)) {
+        return env_key;
+    }
 
     return NULL;
 }
@@ -3605,7 +3605,7 @@ int main(void) {
     /* *** ADDED FOR OPEN WEBUI *** */
     if (!api_key) {
         fprintf(stderr,
-                "WEBUI_API_KEY not set; continuing without authentication. Configure it if your server requires a token.\n");
+                "WEBUI_API_KEY not set in config.h or the environment; continuing without authentication. Configure it if your server requires a token.\n");
     } else {
         printf("Using Open WebUI API Key: [SET]\n");
     }
