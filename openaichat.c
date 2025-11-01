@@ -99,67 +99,43 @@ static char *append_to_history(char *history, const char *text);
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp);
 
 static const char *get_search_endpoint(void) {
-    static int initialised = 0;
-    static const char *cached = NULL;
-    const char *env_value = NULL;
+    const char *env_value = getenv("AICHAT_SEARCH_URL");
 
-    if (!initialised) {
-        env_value = getenv("AICHAT_SEARCH_URL");
-        if (has_visible_text(env_value)) {
-            cached = env_value;
-        }
-        initialised = 1;
+    if (has_visible_text(env_value)) {
+        return env_value;
     }
 
-    return cached;
+    return NULL;
 }
 
 static const char *get_search_api_key(void) {
-    static int initialised = 0;
-    static const char *cached = NULL;
-    const char *env_value = NULL;
+    const char *env_value = getenv("AICHAT_SEARCH_KEY");
 
-    if (!initialised) {
-        env_value = getenv("AICHAT_SEARCH_KEY");
-        if (has_visible_text(env_value)) {
-            cached = env_value;
-        }
-        initialised = 1;
+    if (has_visible_text(env_value)) {
+        return env_value;
     }
 
-    return cached;
+    return NULL;
 }
 
 static const char *get_search_header_name(void) {
-    static int initialised = 0;
-    static const char *cached = NULL;
-    const char *env_value = NULL;
+    const char *env_value = getenv("AICHAT_SEARCH_HEADER");
 
-    if (!initialised) {
-        env_value = getenv("AICHAT_SEARCH_HEADER");
-        if (has_visible_text(env_value)) {
-            cached = env_value;
-        }
-        initialised = 1;
+    if (has_visible_text(env_value)) {
+        return env_value;
     }
 
-    return cached;
+    return NULL;
 }
 
 static const char *get_search_query_param(void) {
-    static int initialised = 0;
-    static const char *cached = "q";
-    const char *env_value = NULL;
+    const char *env_value = getenv("AICHAT_SEARCH_PARAM");
 
-    if (!initialised) {
-        env_value = getenv("AICHAT_SEARCH_PARAM");
-        if (has_visible_text(env_value)) {
-            cached = env_value;
-        }
-        initialised = 1;
+    if (has_visible_text(env_value)) {
+        return env_value;
     }
 
-    return cached;
+    return "q";
 }
 
 static int is_search_configured(void) {
