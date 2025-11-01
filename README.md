@@ -78,7 +78,8 @@ aiChat can enrich each turn with research notes pulled from a JSON web search AP
   `AICHAT_SEARCH_HEADER` (default: `Authorization`, automatically prefixed with `Bearer` when the header is left at its
   default).
 * Some providers reject generic clients. Set `AICHAT_SEARCH_UA` to override the `User-Agent` header if the default
-  `Mozilla/5.0 (compatible; openaichat/1.0)` is blocked.
+  `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36` is
+  blocked.
 * When search is configured, the diagnostics panel confirms the endpoint and the UI enables a **Use web search between turns**
   toggle. Each conversation prepends the fetched snippets to the prompt history and the transcript shows the resulting links.
 * You can also query aiChat directly from the command line with `curl http://127.0.0.1:4000/diagnostics` to view the same

@@ -145,7 +145,7 @@ static const char *get_search_user_agent(void) {
         return env_value;
     }
 
-    return "Mozilla/5.0 (compatible; openaichat/1.0)";
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 }
 
 static void describe_search_environment(void) {
