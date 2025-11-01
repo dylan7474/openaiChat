@@ -8,6 +8,7 @@ streams every reply back to the UI as soon as it is generated.
 
 ### Key capabilities
 * Streams conversation updates message-by-message so you can follow the debate in real time.
+* Offers one-click transcript exports (plain text or JSON) once a session finishes.
 * Discovers the available Open WebUI models at start-up and highlights if a previously selected model disappears.
 * Provides a built-in HTML interface served from `/`—no external assets or tooling required.
 * Exposes JSON endpoints so other tools can fetch the Open WebUI model list or trigger conversations programmatically.
@@ -76,7 +77,8 @@ sudo apt-get install -y \
 5. Press **Start conversation** to begin. Status messages above the form show whether aiChat is waiting on models, talking
    to Open WebUI, or complete, and the API indicator reports the connection state.
 6. Watch the transcript panel fill in as each response arrives. Messages show the speaker’s friendly name, chosen model,
-   and reply text.
+   and reply text. When the discussion summary appears, use the **Download transcript** buttons above the log to save the
+   exchange as plain text or structured JSON.
 
 ## Troubleshooting Open WebUI connectivity
 
@@ -135,7 +137,6 @@ following `type` values:
 * `error` — a terminal error message if the conversation could not be completed.
 
 ## Roadmap
-* Provide a transcript export option (text/JSON) after the session ends.
 * Persist model and participant selections in browser storage (cookies or `localStorage`) so you do not need to re-enter them on every visit.
 * Offer a command-line mode that prints the transcript without launching the browser UI.
 
