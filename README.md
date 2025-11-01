@@ -14,7 +14,7 @@ streams every reply back to the UI as soon as it is generated.
 
 ## Prerequisites
 * A running Open WebUI instance reachable from the machine that launches aiChat. The default endpoint is
-  `http://127.0.0.1:3000/ollama/api/generate`.
+  `http://127.0.0.1:8080/ollama/api/generate`.
 * Build tools: `gcc`, `make`, and `pkg-config`.
 * Development headers for `libcurl` and `json-c`.
 
