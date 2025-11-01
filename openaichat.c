@@ -59,12 +59,35 @@ static const char *get_ollama_url(void) {
 }
 
 /* *** ADDED FOR OPEN WEBUI *** */
+static int has_visible_text(const char *value) {
+    if (!value) {
+        return 0;
+    }
+
+    while (*value) {
+        if (!isspace((unsigned char)*value)) {
+            return 1;
+        }
+        value++;
+    }
+
+    return 0;
+}
+
 static const char *get_webui_key(void) {
+    const char *env_key = getenv("WEBUI_API_KEY");
+
+    if (has_visible_text(env_key)) {
+        return env_key;
+    }
+
 #ifdef WEBUI_API_KEY
-    if (WEBUI_API_KEY[0] != '\0') {
+    if (has_visible_text(WEBUI_API_KEY) &&
+        strcmp(WEBUI_API_KEY, "your-real-api-key-goes-here") != 0) {
         return WEBUI_API_KEY;
     }
 #endif
+
     return NULL;
 }
 

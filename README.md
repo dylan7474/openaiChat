@@ -46,8 +46,9 @@ sudo apt-get install -y \
 4. Run the generated `aichat.exe` from the same shell.
 
 ## Running the server
-* Before launching the server, edit `config.h` and replace the placeholder `WEBUI_API_KEY` value with your actual Open
-  WebUI credential, then rebuild so the key is compiled into the binary.
+* Before launching the server, provide your Open WebUI API key by either exporting `WEBUI_API_KEY` in the environment or
+  by editing `config.h` and rebuilding. The bundled placeholder is ignored automatically, so leaving it untouched simply
+  means aiChat will make unauthenticated requests.
 * Execute `./openaichat` after building. On success the server prints the URL it bound to (defaults to
   `http://127.0.0.1:17863`).
 * If the preferred port is taken, aiChat retries up to three higher ports before giving up.
