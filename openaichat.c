@@ -3563,9 +3563,82 @@ static void handle_client(int client_fd, const char *ollama_url) {
     free(request);
 }
 
+static int probe_models_endpoint(const char *label, const char *url) {
+    json_object *payload = NULL;
+    json_object *models = NULL;
+    char *error_message = NULL;
+    int rc = -1;
+
+    if (!url) {
+        printf("[SKIP] %s: endpoint not available.\n", label);
+        return -1;
+    }
+
+    printf("[TEST] %s\n", label);
+    printf("        %s\n", url);
+
+    rc = fetch_models_via_url(url, &payload, &error_message);
+    if (rc == 0) {
+        int model_count = 0;
+        if (json_object_object_get_ex(payload, "models", &models) &&
+            json_object_is_type(models, json_type_array)) {
+            model_count = (int)json_object_array_length(models);
+        }
+        printf("[PASS] Received %d model%s from %s.\n",
+               model_count,
+               model_count == 1 ? "" : "s",
+               label);
+        json_object_put(payload);
+        return 0;
+    }
+
+    printf("[FAIL] %s request failed: %s\n",
+           label,
+           error_message ? error_message : "see stderr for details");
+    if (error_message) {
+        free(error_message);
+    }
+    if (payload) {
+        json_object_put(payload);
+    }
+
+    return -1;
+}
+
+static int print_webui_diagnostics(void) {
+    const char *ollama_url = get_ollama_url();
+    const char *api_key = get_webui_key();
+    char *models_url = build_webui_models_url(ollama_url);
+    char *fallback_url = build_ollama_tags_url(ollama_url);
+    int success = 0;
+
+    printf("Open WebUI diagnostics\n");
+    printf("------------------------\n");
+    printf("Base URL: %s\n", ollama_url);
+    printf("API key: %s\n", api_key ? "[SET]" : "(not provided)");
+
+    if (probe_models_endpoint("Open WebUI models endpoint", models_url) == 0) {
+        success = 1;
+    }
+
+    if (probe_models_endpoint("Legacy Ollama fallback endpoint", fallback_url) == 0) {
+        success = 1;
+    }
+
+    if (!success) {
+        printf("No endpoints responded successfully. Review the error details above to continue troubleshooting.\n");
+    }
+
+    free(models_url);
+    free(fallback_url);
+
+    return success ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 static void print_usage(const char *program_name) {
-    printf("Usage: %s [--check-search]\n", program_name ? program_name : "openaichat");
+    printf("Usage: %s [--check-search] [--check-webui]\n", program_name ? program_name : "openaichat");
     printf("  --check-search   Print the detected web search configuration and exit.\n");
+    printf("  --check-webui    Probe the Open WebUI API endpoints and exit.\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -3587,6 +3660,9 @@ int main(int argc, char *argv[]) {
     if (argc > 1) {
         if (strcmp(argv[1], "--check-search") == 0) {
             return print_search_configuration();
+        }
+        if (strcmp(argv[1], "--check-webui") == 0) {
+            return print_webui_diagnostics();
         }
         if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
             print_usage(argv[0]);
