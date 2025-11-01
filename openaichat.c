@@ -2159,7 +2159,7 @@ static const char *get_html_page(void) {
            "      55% { box-shadow: 0 0 36px var(--message-glow, rgba(56, 189, 248, 0.55)); }\n"
            "      100% { box-shadow: 0 12px 28px var(--message-glow, rgba(15, 23, 42, 0.6)); }\n"
            "    }\n"
-           "    .message strong { display: block; margin-bottom: 0.35rem; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(226, 232, 240, 0.92); }\n"
+           "    .message strong { display: block; margin-bottom: 0.35rem; letter-spacing: 0.05em; color: rgba(226, 232, 240, 0.92); }\n"
            "    .research-notes { margin-top: 0.75rem; padding: 0.75rem 1rem; border-radius: 12px; background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(94, 234, 212, 0.35); box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.18); }\n"
            "    .research-notes strong { display: block; margin-bottom: 0.5rem; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(94, 234, 212, 0.9); font-size: 0.85rem; }\n"
            "    .research-notes ul { margin: 0; padding-left: 1.15rem; list-style: decimal; color: rgba(226, 232, 240, 0.92); }\n"
