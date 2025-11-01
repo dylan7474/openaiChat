@@ -138,6 +138,16 @@ static const char *get_search_query_param(void) {
     return "q";
 }
 
+static const char *get_search_accept_header(void) {
+    const char *env_value = getenv("AICHAT_SEARCH_ACCEPT");
+
+    if (has_visible_text(env_value)) {
+        return env_value;
+    }
+
+    return "application/json";
+}
+
 static const char *get_search_user_agent(void) {
     const char *env_value = getenv("AICHAT_SEARCH_UA");
 
@@ -153,6 +163,7 @@ static void describe_search_environment(void) {
     const char *api_key = get_search_api_key();
     const char *header_name = get_search_header_name();
     const char *query_param = get_search_query_param();
+    const char *accept_value = get_search_accept_header();
     const char *user_agent = get_search_user_agent();
 
     if (endpoint) {
@@ -174,6 +185,10 @@ static void describe_search_environment(void) {
             printf("Header override: %s\n", header_name);
         } else {
             printf("Header override: Authorization\n");
+        }
+
+        if (accept_value) {
+            printf("Accept: %s\n", accept_value);
         }
 
         if (user_agent) {
@@ -227,6 +242,29 @@ static int append_api_key_header(struct curl_slist **headers, const char *header
     return 0;
 }
 
+static int append_accept_header(struct curl_slist **headers, const char *accept_value) {
+    char header_buffer[128];
+    int written = 0;
+
+    if (!headers || !accept_value || !*accept_value) {
+        return 0;
+    }
+
+    written = snprintf(header_buffer, sizeof(header_buffer), "Accept: %s", accept_value);
+    if (written < 0 || written >= (int)sizeof(header_buffer)) {
+        fprintf(stderr, "Search Accept header value is too long.\n");
+        return -1;
+    }
+
+    *headers = curl_slist_append(*headers, header_buffer);
+    if (!*headers) {
+        fprintf(stderr, "Failed to allocate curl header list.\n");
+        return -1;
+    }
+
+    return 0;
+}
+
 static char *build_search_probe_url(CURL *curl, const char *endpoint, const char *query_param, const char *query_text) {
     char *escaped = NULL;
     char *result = NULL;
@@ -261,17 +299,23 @@ static char *build_search_probe_url(CURL *curl, const char *endpoint, const char
     return result;
 }
 
-static void print_search_reproduction_tip(const char *request_url, const char *header_name, const char *api_key) {
+static void print_search_reproduction_tip(const char *request_url,
+                                          const char *header_name,
+                                          const char *api_key,
+                                          const char *accept_value) {
     if (!request_url) {
         return;
     }
 
     printf("Reproduce with curl:\n");
-    if (api_key) {
-        printf("  curl -H \"%s: %s\" \"%s\"\n", header_name && *header_name ? header_name : "Authorization", api_key, request_url);
-    } else {
-        printf("  curl \"%s\"\n", request_url);
+    printf("  curl");
+    if (accept_value && *accept_value) {
+        printf(" -H \"Accept: %s\"", accept_value);
     }
+    if (api_key) {
+        printf(" -H \"%s: %s\"", header_name && *header_name ? header_name : "Authorization", api_key);
+    }
+    printf(" \"%s\"\n", request_url);
 }
 
 static int probe_search_endpoint(void) {
@@ -280,6 +324,7 @@ static int probe_search_endpoint(void) {
     const char *header_name = get_search_header_name();
     const char *query_param = get_search_query_param();
     const char *probe_query = "open webui search diagnostics";
+    const char *accept_value = get_search_accept_header();
     const char *user_agent = get_search_user_agent();
     struct curl_slist *headers = NULL;
     struct MemoryStruct chunk = {.memory = NULL, .size = 0};
@@ -314,6 +359,10 @@ static int probe_search_endpoint(void) {
         goto cleanup;
     }
 
+    if (append_accept_header(&headers, accept_value) != 0) {
+        goto cleanup;
+    }
+
     if (api_key && append_api_key_header(&headers, header_name, api_key) != 0) {
         goto cleanup;
     }
@@ -344,7 +393,7 @@ static int probe_search_endpoint(void) {
                http_status,
                chunk.size,
                chunk.size == 1 ? "" : "s");
-        print_search_reproduction_tip(request_url, header_name, api_key);
+        print_search_reproduction_tip(request_url, header_name, api_key, accept_value);
         rc = EXIT_SUCCESS;
     } else {
         if (res != CURLE_OK) {
@@ -352,7 +401,7 @@ static int probe_search_endpoint(void) {
         } else {
             fprintf(stderr, "Search request returned HTTP %ld.\n", http_status);
         }
-        print_search_reproduction_tip(request_url, header_name, api_key);
+        print_search_reproduction_tip(request_url, header_name, api_key, accept_value);
         printf("Review the curl output above to continue troubleshooting the search endpoint.\n");
     }
 
@@ -766,6 +815,7 @@ static int perform_web_search(const char *query, json_object **out_payload, char
     const char *api_key = get_search_api_key();
     const char *header_name = get_search_header_name();
     const char *query_param = get_search_query_param();
+    const char *accept_value = get_search_accept_header();
     const char *user_agent = get_search_user_agent();
     struct curl_slist *headers = NULL;
     long status_code = 0;
@@ -836,6 +886,10 @@ static int perform_web_search(const char *query, json_object **out_payload, char
         curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent);
     }
 
+    if (append_accept_header(&headers, accept_value) != 0) {
+        goto cleanup;
+    }
+
     if (api_key && *api_key) {
         char header_buffer[512];
         const char *name = header_name && *header_name ? header_name : "Authorization";
@@ -845,9 +899,10 @@ static int perform_web_search(const char *query, json_object **out_payload, char
             snprintf(header_buffer, sizeof(header_buffer), "%s: %s", name, api_key);
         }
         headers = curl_slist_append(headers, header_buffer);
-        if (headers) {
-            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        }
+    }
+
+    if (headers) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
 
     fprintf(stdout, "Running web search for query: %s\n", query);
