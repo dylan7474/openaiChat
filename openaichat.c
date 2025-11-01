@@ -1268,9 +1268,13 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
             prompt_index = json_object_array_length(request_messages);
             json_object_array_add(request_messages, prompt_message);
 
+            // Only enable web search for the first participant on the first turn.
+            int is_first_request = (turn == 0 && idx == 0);
+            int use_web_search = search_enabled && is_first_request;
+
             response = get_ai_response(request_messages, participants[idx].model,
                                        participants[idx].name, participants[idx].display_model,
-                                       ollama_url, search_enabled);
+                                       ollama_url, use_web_search);
             if (!response) {
                 json_object_array_del_idx(request_messages, prompt_index, 1);
                 if (error_out) {
@@ -1281,6 +1285,9 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
                 }
                 goto fail;
             }
+
+            // Remove the temporary prompt message before adding the assistant response.
+            json_object_array_del_idx(request_messages, prompt_index, 1);
 
             assistant_message = json_object_new_object();
             if (!assistant_message) {
