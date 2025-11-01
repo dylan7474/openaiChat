@@ -138,7 +138,7 @@ static const char *get_search_query_param(void) {
     return "q";
 }
 
-static int print_search_configuration(void) {
+static void describe_search_environment(void) {
     const char *endpoint = get_search_endpoint();
     const char *api_key = get_search_api_key();
     const char *header_name = get_search_header_name();
@@ -165,15 +165,187 @@ static int print_search_configuration(void) {
             printf("Header override: Authorization\n");
         }
 
-        return EXIT_SUCCESS;
+        return;
     }
 
     printf("Web search is disabled. Export AICHAT_SEARCH_URL to enable it.\n");
-    return EXIT_FAILURE;
 }
 
 static int is_search_configured(void) {
     return get_search_endpoint() != NULL;
+}
+
+static int print_search_configuration(void) {
+    if (is_search_configured()) {
+        describe_search_environment();
+        return EXIT_SUCCESS;
+    }
+
+    describe_search_environment();
+    return EXIT_FAILURE;
+}
+
+static int append_api_key_header(struct curl_slist **headers, const char *header_name, const char *api_key) {
+    char header_buffer[512];
+    int written = 0;
+
+    if (!headers || !api_key) {
+        return 0;
+    }
+
+    if (!header_name || !*header_name) {
+        header_name = "Authorization";
+    }
+
+    written = snprintf(header_buffer, sizeof(header_buffer), "%s: %s", header_name, api_key);
+    if (written < 0 || written >= (int)sizeof(header_buffer)) {
+        fprintf(stderr, "Search API key is too long to fit in request header.\n");
+        return -1;
+    }
+
+    *headers = curl_slist_append(*headers, header_buffer);
+    if (!*headers) {
+        fprintf(stderr, "Failed to allocate curl header list.\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static char *build_search_probe_url(CURL *curl, const char *endpoint, const char *query_param, const char *query_text) {
+    char *escaped = NULL;
+    char *result = NULL;
+
+    if (!curl || !endpoint || !query_text) {
+        return NULL;
+    }
+
+    if (!query_param || !*query_param) {
+        query_param = "q";
+    }
+
+    escaped = curl_easy_escape(curl, query_text, 0);
+    if (!escaped) {
+        return NULL;
+    }
+
+    if (strstr(endpoint, "%s")) {
+        if (asprintf(&result, endpoint, escaped) == -1) {
+            result = NULL;
+        }
+    } else {
+        const char *separator = strchr(endpoint, '?') ? "&" : "?";
+        size_t needed = strlen(endpoint) + strlen(separator) + strlen(query_param) + 1 + strlen(escaped) + 1;
+        result = malloc(needed);
+        if (result) {
+            snprintf(result, needed, "%s%s%s=%s", endpoint, separator, query_param, escaped);
+        }
+    }
+
+    curl_free(escaped);
+    return result;
+}
+
+static void print_search_reproduction_tip(const char *request_url, const char *header_name, const char *api_key) {
+    if (!request_url) {
+        return;
+    }
+
+    printf("Reproduce with curl:\n");
+    if (api_key) {
+        printf("  curl -H \"%s: %s\" \"%s\"\n", header_name && *header_name ? header_name : "Authorization", api_key, request_url);
+    } else {
+        printf("  curl \"%s\"\n", request_url);
+    }
+}
+
+static int probe_search_endpoint(void) {
+    const char *endpoint = get_search_endpoint();
+    const char *api_key = get_search_api_key();
+    const char *header_name = get_search_header_name();
+    const char *query_param = get_search_query_param();
+    const char *probe_query = "open webui search diagnostics";
+    struct curl_slist *headers = NULL;
+    struct MemoryStruct chunk = {.memory = NULL, .size = 0};
+    CURL *curl = NULL;
+    CURLcode res = CURLE_OK;
+    long http_status = 0;
+    char *request_url = NULL;
+    int rc = EXIT_FAILURE;
+
+    if (!endpoint) {
+        describe_search_environment();
+        return EXIT_FAILURE;
+    }
+
+    chunk.memory = malloc(1);
+    if (!chunk.memory) {
+        fprintf(stderr, "Failed to allocate search response buffer.\n");
+        return EXIT_FAILURE;
+    }
+    chunk.size = 0;
+
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
+    if (!curl) {
+        fprintf(stderr, "Unable to initialise CURL for search probe.\n");
+        goto cleanup;
+    }
+
+    request_url = build_search_probe_url(curl, endpoint, query_param, probe_query);
+    if (!request_url) {
+        fprintf(stderr, "Failed to construct search request URL.\n");
+        goto cleanup;
+    }
+
+    if (api_key && append_api_key_header(&headers, header_name, api_key) != 0) {
+        goto cleanup;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, request_url);
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    if (headers) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    }
+
+    printf("Web search diagnostics\n");
+    printf("---------------------\n");
+    describe_search_environment();
+    printf("Probe query: '%s'\n", probe_query);
+    printf("Resolved request URL: %s\n", request_url);
+
+    res = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+
+    if (res == CURLE_OK && http_status >= 200 && http_status < 300) {
+        printf("[PASS] Search request succeeded with HTTP %ld and %zu byte%s in the response.\n",
+               http_status,
+               chunk.size,
+               chunk.size == 1 ? "" : "s");
+        print_search_reproduction_tip(request_url, header_name, api_key);
+        rc = EXIT_SUCCESS;
+    } else {
+        if (res != CURLE_OK) {
+            fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        } else {
+            fprintf(stderr, "Search request returned HTTP %ld.\n", http_status);
+        }
+        print_search_reproduction_tip(request_url, header_name, api_key);
+        printf("Review the curl output above to continue troubleshooting the search endpoint.\n");
+    }
+
+cleanup:
+    curl_slist_free_all(headers);
+    if (curl) {
+        curl_easy_cleanup(curl);
+    }
+    curl_global_cleanup();
+    free(request_url);
+    free(chunk.memory);
+    return rc;
 }
 
 static char *duplicate_and_normalise_text(const char *text) {
@@ -3636,8 +3808,10 @@ static int print_webui_diagnostics(void) {
 }
 
 static void print_usage(const char *program_name) {
-    printf("Usage: %s [--check-search] [--check-webui]\n", program_name ? program_name : "openaichat");
+    printf("Usage: %s [--check-search] [--probe-search] [--check-webui]\n",
+           program_name ? program_name : "openaichat");
     printf("  --check-search   Print the detected web search configuration and exit.\n");
+    printf("  --probe-search   Send a sample query to the search endpoint and report the result.\n");
     printf("  --check-webui    Probe the Open WebUI API endpoints and exit.\n");
 }
 
@@ -3660,6 +3834,9 @@ int main(int argc, char *argv[]) {
     if (argc > 1) {
         if (strcmp(argv[1], "--check-search") == 0) {
             return print_search_configuration();
+        }
+        if (strcmp(argv[1], "--probe-search") == 0) {
+            return probe_search_endpoint();
         }
         if (strcmp(argv[1], "--check-webui") == 0) {
             return print_webui_diagnostics();
