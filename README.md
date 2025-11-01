@@ -72,7 +72,7 @@ sudo apt-get install -y \
      button next to it.
    * Pick a model for each participant. aiChat fetches the list from `/models`; if a desired model disappears, the UI
      raises a warning and keeps the selection for when it returns.
-4. Toggle **Use web search between turns** to request Open WebUI's built-in web search tool between replies when the connected instance supports it.
+4. Toggle **Use web search between turns** to request Open WebUI's built-in web search tool between replies when the connected instance supports it. When enabled, aiChat forwards the returned research notes alongside each participant message so you can attribute facts as they surface.
 5. Press **Start conversation** to begin. Status messages above the form show whether aiChat is waiting on models, talking
    to Open WebUI, or complete, and the API indicator reports the connection state.
 6. Watch the transcript panel fill in as each response arrives. Messages show the speaker’s friendly name, chosen model,
@@ -136,7 +136,7 @@ following `type` values:
 
 ## Roadmap
 * Provide a transcript export option (text/JSON) after the session ends.
-* Allow saving and reusing favourite participant rosters.
+* Persist model and participant selections in browser storage (cookies or `localStorage`) so you do not need to re-enter them on every visit.
 * Offer a command-line mode that prints the transcript without launching the browser UI.
 
 ## License
