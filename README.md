@@ -35,8 +35,9 @@ sudo apt-get install -y \
 
 ### Linux (GNU Make)
 1. `./configure`
-2. `make`
-3. Run the resulting `./aichat` binary.
+2. Update `config.h` with your Open WebUI API key.
+3. `make`
+4. Run the resulting `./aichat` binary.
 
 ### Windows (MinGW / MSYS2 Make)
 1. Launch an MSYS2 or MinGW shell that provides the GNU toolchain and `pkg-config`.
@@ -45,6 +46,8 @@ sudo apt-get install -y \
 4. Run the generated `aichat.exe` from the same shell.
 
 ## Running the server
+* Before launching the server, edit `config.h` and replace the placeholder `WEBUI_API_KEY` value with your actual Open
+  WebUI credential, then rebuild so the key is compiled into the binary.
 * Execute `./openaichat` after building. On success the server prints the URL it bound to (defaults to
   `http://127.0.0.1:17863`).
 * If the preferred port is taken, aiChat retries up to three higher ports before giving up.
