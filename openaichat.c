@@ -2198,7 +2198,7 @@ static const char *get_html_page(void) {
            "    const enableSearchInput = document.getElementById('enableSearch');\n"
            "    const searchToggleLabel = enableSearchInput ? enableSearchInput.closest('.form-toggle') : null;\n"
            "    const searchHelperEl = document.getElementById('searchHelper');\n"
-           "    const searchState = { configured: false, requested: false, active: false };\n"
+           "    const searchState = { configured: __SEARCH_CONFIGURED__, requested: false, active: false };\n"
            "    const MODEL_LOAD_ERROR_MESSAGE = 'Unable to load models from Open WebUI. Expand the troubleshooting tips below for commands you can try.';\n"
            "    const MODEL_LOAD_ERROR_KEY = 'model-load-error';\n"
            "    let diagnosticsInfo = null;\n"
@@ -3118,6 +3118,40 @@ static const char *get_html_page(void) {
            "</html>\n";
 }
 
+static char *render_html_page(void) {
+    const char *template = get_html_page();
+    const char *placeholder = "__SEARCH_CONFIGURED__";
+    const char *value = is_search_configured() ? "true" : "false";
+    const char *match = strstr(template, placeholder);
+    size_t template_len = strlen(template);
+
+    if (!match) {
+        char *copy = malloc(template_len + 1);
+        if (!copy) {
+            return NULL;
+        }
+        memcpy(copy, template, template_len + 1);
+        return copy;
+    }
+
+    size_t prefix_len = (size_t)(match - template);
+    size_t placeholder_len = strlen(placeholder);
+    size_t value_len = strlen(value);
+    size_t suffix_len = template_len - prefix_len - placeholder_len;
+    size_t result_len = prefix_len + value_len + suffix_len;
+    char *result = malloc(result_len + 1);
+
+    if (!result) {
+        return NULL;
+    }
+
+    memcpy(result, template, prefix_len);
+    memcpy(result + prefix_len, value, value_len);
+    memcpy(result + prefix_len + value_len, match + placeholder_len, suffix_len);
+    result[result_len] = '\0';
+    return result;
+}
+
 static int parse_int_header(const char *headers, const char *key) {
     const char *location = strcasestr(headers, key);
     if (!location) {
@@ -3456,7 +3490,13 @@ static void handle_client(int client_fd, const char *ollama_url) {
     }
 
     if (strcmp(method, "GET") == 0 && strcmp(path, "/") == 0) {
-        send_http_response(client_fd, "200 OK", "text/html; charset=UTF-8", get_html_page());
+        char *html = render_html_page();
+        if (!html) {
+            send_http_error(client_fd, "500 Internal Server Error", "Unable to render interface.");
+        } else {
+            send_http_response(client_fd, "200 OK", "text/html; charset=UTF-8", html);
+            free(html);
+        }
     } else if (strcmp(method, "GET") == 0 && strcmp(path, "/models") == 0) {
         handle_models_request(client_fd, ollama_url);
     } else if (strcmp(method, "GET") == 0 && strcmp(path, "/diagnostics") == 0) {
