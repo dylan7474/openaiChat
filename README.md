@@ -50,7 +50,7 @@ sudo apt-get install -y \
   by editing `config.h` and rebuilding. The bundled placeholder is ignored automatically, so leaving it untouched simply
   means aiChat will make unauthenticated requests.
 * Execute `./openaichat` after building. On success the server prints the URL it bound to (defaults to
-  `http://127.0.0.1:17863`).
+  `http://127.0.0.1:4000`).
 * If the preferred port is taken, aiChat retries up to three higher ports before giving up.
 * Override the listening port by exporting `AICHAT_PORT`, e.g. `AICHAT_PORT=19000 ./openaichat`.
 * Point aiChat at a different Open WebUI deployment by setting `OLLAMA_URL` to the proxied `/ollama/api/generate` endpoint.
