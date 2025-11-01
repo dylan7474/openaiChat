@@ -14,7 +14,8 @@
 #include <curl/curl.h>
 #include <json-c/json.h>
 
-#define DEFAULT_OLLAMA_URL "http://127.0.0.1:11434/api/generate"
+/* *** MODIFIED FOR OPEN WEBUI *** */
+#define DEFAULT_OLLAMA_URL "http://127.0.0.1:3000/ollama/api/generate"
 #define SYSTEM_PROMPT                                                                                 \
     "You are a helpful and creative AI assistant in a conversation with other friendly AI "        \
     "companions. The user has started the conversation with a topic. Engage in a natural, "         \
@@ -53,6 +54,15 @@ static const char *get_ollama_url(void) {
         return env;
     }
     return DEFAULT_OLLAMA_URL;
+}
+
+/* *** ADDED FOR OPEN WEBUI *** */
+static const char *get_webui_key(void) {
+    const char *env = getenv("WEBUI_API_KEY");
+    if (env && *env) {
+        return env;
+    }
+    return NULL;
 }
 
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -399,6 +409,9 @@ static char *get_ai_response(const char *full_prompt, const char *model_name,
     if (curl) {
         json_object *jobj = json_object_new_object();
         struct curl_slist *headers = NULL;
+        /* *** MODIFIED FOR OPEN WEBUI *** */
+        const char *api_key = get_webui_key();
+        char auth_header[512];
 
         json_object_object_add(jobj, "model", json_object_new_string(model_name));
         json_object_object_add(jobj, "prompt", json_object_new_string(full_prompt));
@@ -406,6 +419,12 @@ static char *get_ai_response(const char *full_prompt, const char *model_name,
 
         const char *json_payload = json_object_to_json_string(jobj);
         headers = curl_slist_append(NULL, "Content-Type: application/json");
+
+        /* *** MODIFIED FOR OPEN WEBUI *** */
+        if (api_key) {
+            snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
+            headers = curl_slist_append(headers, auth_header);
+        }
 
         curl_easy_setopt(curl, CURLOPT_URL, ollama_url);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_payload);
@@ -524,6 +543,17 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
         return -1;
     }
 
+    /* *** MODIFIED FOR OPEN WEBUI *** */
+    const char *api_key = get_webui_key();
+    char auth_header[512];
+    struct curl_slist *headers = NULL;
+
+    if (api_key) {
+        snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
+        headers = curl_slist_append(headers, auth_header);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    }
+
     curl_easy_setopt(curl, CURLOPT_URL, models_url);
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
@@ -531,6 +561,8 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
 
     res = curl_easy_perform(curl);
     free(models_url);
+    /* *** MODIFIED FOR OPEN WEBUI *** */
+    curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     curl_global_cleanup();
 
@@ -2149,6 +2181,8 @@ int main(void) {
     int port_from_env = 0;
     const char *port_env = getenv("AICHAT_PORT");
     const char *ollama_url = get_ollama_url();
+    /* *** ADDED FOR OPEN WEBUI *** */
+    const char *api_key = get_webui_key();
 
     if (port_env && *port_env) {
         char *endptr = NULL;
@@ -2218,6 +2252,13 @@ int main(void) {
 
     printf("aiChat web server ready on http://127.0.0.1:%d\n", port);
     printf("Using Ollama endpoint: %s\n", ollama_url);
+    /* *** ADDED FOR OPEN WEBUI *** */
+    if (!api_key) {
+        fprintf(stderr, "Warning: WEBUI_API_KEY environment variable is not set. Requests will likely fail.\n");
+    } else {
+        printf("Using Open WebUI API Key: [SET]\n");
+    }
+
 
     while (1) {
         int client_fd;
