@@ -1,7 +1,7 @@
 # aiChat
 
 ## Overview
-aiChat is a lightweight C web server that lets you stage round-table conversations between multiple Ollama-hosted
+openaiChat is a lightweight C web server that lets you stage round-table conversations between multiple Ollama-hosted
 models. Launch the binary, open the served page in your browser, and configure up to six companions—each with a friendly
 name and a backing Ollama model tag. The application coordinates turn-based conversations through the Ollama HTTP API and
 streams every reply back to the UI as soon as it is generated.
@@ -45,10 +45,10 @@ sudo apt-get install -y \
 4. Run the generated `aichat.exe` from the same shell.
 
 ## Running the server
-* Execute `./aichat` after building. On success the server prints the URL it bound to (defaults to
+* Execute `./openaichat` after building. On success the server prints the URL it bound to (defaults to
   `http://127.0.0.1:17863`).
 * If the preferred port is taken, aiChat retries up to three higher ports before giving up.
-* Override the listening port by exporting `AICHAT_PORT`, e.g. `AICHAT_PORT=19000 ./aichat`.
+* Override the listening port by exporting `AICHAT_PORT`, e.g. `AICHAT_PORT=19000 ./openaichat`.
 * Point aiChat at a different Ollama deployment by setting `OLLAMA_URL` to the full `/api/generate` endpoint.
 * Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal where it is running.
 
