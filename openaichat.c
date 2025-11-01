@@ -17,7 +17,8 @@
 #include "config.h"
 
 /* *** MODIFIED FOR OPEN WEBUI *** */
-#define DEFAULT_OLLAMA_URL "http://xblade.dylaniones.org:8080/api/chat/completions"
+#define DEFAULT_WEBUI_BASE "http://192.168.50.5:8080"
+#define DEFAULT_OLLAMA_URL DEFAULT_WEBUI_BASE "/api/chat/completions"
 #define SYSTEM_PROMPT                                                                                 \
     "You are a helpful and creative AI assistant in a conversation with other friendly AI "        \
     "companions. The user has started the conversation with a topic. Engage in a natural, "         \
@@ -1682,7 +1683,7 @@ static const char *get_html_page(void) {
            "      <summary>API troubleshooting tips</summary>\n"
            "      <div class=\"diagnostics-content\">\n"
            "        <p id=\"diagnosticsSummary\">aiChat will display connection details here after it inspects the Open WebUI API.</p>\n"
-           "        <pre><code id=\"diagnosticsCurl\">curl http://127.0.0.1:8080/api/models</code></pre>\n"
+           "        <pre><code id=\"diagnosticsCurl\">curl " DEFAULT_WEBUI_BASE "/api/models</code></pre>\n"
            "        <p id=\"diagnosticsNotes\">Run the command above from the machine hosting aiChat to confirm the API responds, then check the terminal for detailed error logs.</p>\n"
            "      </div>\n"
            "    </details>\n"
@@ -1829,7 +1830,7 @@ static const char *get_html_page(void) {
            "        if (preferredUrl) {\n"
            "          commandParts.push(`\"${preferredUrl}\"`);\n"
            "        } else {\n"
-           "          commandParts.push('\"http://127.0.0.1:8080/api/models\"');\n"
+           "          commandParts.push('\"" DEFAULT_WEBUI_BASE "/api/models\"');\n"
            "        }\n"
            "        if (state === 'disconnected') {\n"
            "          commandParts.push('--verbose');\n"

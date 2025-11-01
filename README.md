@@ -54,8 +54,8 @@ sudo apt-get install -y \
   `http://127.0.0.1:4000`).
 * If the preferred port is taken, aiChat retries up to three higher ports before giving up.
 * Override the listening port by exporting `AICHAT_PORT`, e.g. `AICHAT_PORT=19000 ./openaichat`.
-* Point aiChat at a different Open WebUI deployment by setting `OLLAMA_URL` to the proxied `/ollama/api/generate` endpoint.
-  For example, if the Open WebUI interface lives at `http://127.0.0.1:8080/`, export `OLLAMA_URL=http://127.0.0.1:8080/ollama/api/generate`.
+* Point aiChat at a different Open WebUI deployment by setting `OLLAMA_URL` to the proxied `/api/chat/completions` endpoint.
+  For example, if the Open WebUI interface lives at `http://192.168.50.5:8080/`, export `OLLAMA_URL=http://192.168.50.5:8080/api/chat/completions`.
 * aiChat prints the derived model discovery URLs at startup. If model loading fails, copy the suggested `curl` command from the
   log or the UI diagnostics panel and run it from the same machine to confirm connectivity.
 * Run `./openaichat --check-webui` to probe the derived Open WebUI API endpoints (including the fallback tags URL) without
@@ -89,7 +89,7 @@ If the status indicator reports “Unable to load models from Open WebUI”, run
    along with reminder commands you can retry manually.
 4. Run `./openaichat --check-webui` from the host where you compiled the binary to exercise the same endpoints without launching
    the server. Successful requests echo the model count; failures repeat the `curl` tips printed during normal start-up.
-5. Adjust `OLLAMA_URL` if needed so that it points at your deployment’s proxied `/ollama/api/generate` endpoint, then restart
+5. Adjust `OLLAMA_URL` if needed so that it points at your deployment’s proxied `/api/chat/completions` endpoint, then restart
    aiChat. The `/diagnostics` endpoint (served by aiChat itself) also reports the currently configured URLs in JSON form.
 
 ## API reference
