@@ -466,7 +466,44 @@ static char *append_to_history(char *history, const char *text) {
     return new_history;
 }
 
-static char *build_models_url(const char *ollama_url) {
+static char *build_webui_models_url(const char *ollama_url) {
+    const char *marker = "/ollama/api/";
+    const char *found = NULL;
+    size_t base_len = 0;
+    const char *suffix = "/api/models";
+
+    if (!ollama_url) {
+        return NULL;
+    }
+
+    found = strstr(ollama_url, marker);
+    if (found) {
+        base_len = (size_t)(found - ollama_url);
+    } else {
+        const char *scheme = strstr(ollama_url, "://");
+        const char *path = NULL;
+        if (scheme) {
+            path = strchr(scheme + 3, '/');
+        } else {
+            path = strchr(ollama_url, '/');
+        }
+        if (path) {
+            base_len = (size_t)(path - ollama_url);
+        } else {
+            base_len = strlen(ollama_url);
+        }
+    }
+
+    char *result = malloc(base_len + strlen(suffix) + 1);
+    if (!result) {
+        return NULL;
+    }
+    memcpy(result, ollama_url, base_len);
+    strcpy(result + base_len, suffix);
+    return result;
+}
+
+static char *build_ollama_tags_url(const char *ollama_url) {
     const char *suffix = "/tags";
     const char *generate = "generate";
     size_t url_len = strlen(ollama_url);
@@ -497,36 +534,33 @@ static char *build_models_url(const char *ollama_url) {
     if (needs_slash) {
         strcat(result, "/");
     }
-    strcat(result, suffix + 1); /* suffix starts with '/', avoid duplicating */
+    strcat(result, suffix + 1);
     return result;
 }
 
-static int fetch_available_models(const char *ollama_url, json_object **out_json, char **error_out) {
+static int fetch_models_via_url(const char *models_url, json_object **out_json, char **error_out) {
     struct MemoryStruct chunk = {.memory = NULL, .size = 0};
     CURL *curl = NULL;
     CURLcode res = CURLE_OK;
-    char *models_url = NULL;
     json_object *parsed = NULL;
     json_object *models_array = NULL;
     json_object *result = NULL;
     json_object *list = NULL;
+    long http_status = 0;
 
-    *out_json = NULL;
     if (error_out) {
         *error_out = NULL;
     }
-
-    models_url = build_models_url(ollama_url);
-    if (!models_url) {
+    if (!models_url || !out_json) {
         if (error_out) {
-            *error_out = strdup("Failed to prepare Ollama models URL.");
+            *error_out = strdup("Invalid models URL.");
         }
         return -1;
     }
 
+    *out_json = NULL;
     chunk.memory = malloc(1);
     if (!chunk.memory) {
-        free(models_url);
         if (error_out) {
             *error_out = strdup("Failed to allocate response buffer.");
         }
@@ -537,7 +571,6 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
     curl_global_init(CURL_GLOBAL_ALL);
     curl = curl_easy_init();
     if (!curl) {
-        free(models_url);
         free(chunk.memory);
         if (error_out) {
             *error_out = strdup("Unable to initialise CURL.");
@@ -546,7 +579,6 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
         return -1;
     }
 
-    /* *** MODIFIED FOR OPEN WEBUI *** */
     const char *api_key = get_webui_key();
     char auth_header[512];
     struct curl_slist *headers = NULL;
@@ -554,32 +586,48 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
     if (api_key) {
         snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
         headers = curl_slist_append(headers, auth_header);
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, models_url);
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    if (headers) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    }
 
     res = curl_easy_perform(curl);
-    free(models_url);
-    /* *** MODIFIED FOR OPEN WEBUI *** */
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     curl_global_cleanup();
 
-    if (res != CURLE_OK) {
+    if (res != CURLE_OK || http_status < 200 || http_status >= 300) {
         free(chunk.memory);
         if (error_out) {
-            *error_out = strdup("Failed to contact Ollama for model list.");
+            if (res != CURLE_OK) {
+                *error_out = strdup("Failed to contact Open WebUI for model list.");
+            } else {
+                char buffer[128];
+                snprintf(buffer, sizeof(buffer), "Open WebUI returned status %ld while listing models.", http_status);
+                *error_out = strdup(buffer);
+            }
         }
         return -1;
     }
 
     parsed = json_tokener_parse(chunk.memory);
     if (parsed && json_object_is_type(parsed, json_type_object)) {
-        json_object_object_get_ex(parsed, "models", &models_array);
+        json_object *field = NULL;
+        if (json_object_object_get_ex(parsed, "models", &field)) {
+            models_array = field;
+        } else if (json_object_object_get_ex(parsed, "data", &field)) {
+            models_array = field;
+        } else if (json_object_object_get_ex(parsed, "items", &field)) {
+            models_array = field;
+        } else if (json_object_object_get_ex(parsed, "list", &field)) {
+            models_array = field;
+        }
     } else if (parsed && json_object_is_type(parsed, json_type_array)) {
         models_array = parsed;
     }
@@ -590,7 +638,7 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
             json_object_put(parsed);
         }
         if (error_out) {
-            *error_out = strdup("Unexpected response from Ollama while listing models.");
+            *error_out = strdup("Unexpected response from Open WebUI while listing models.");
         }
         return -1;
     }
@@ -617,10 +665,29 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
 
         if (json_object_is_type(item, json_type_object)) {
             json_object *field = NULL;
-            if (json_object_object_get_ex(item, "model", &field) && field) {
+            if (json_object_object_get_ex(item, "model", &field) && field &&
+                json_object_get_type(field) == json_type_string) {
                 model_value = json_object_get_string(field);
             }
-            if (json_object_object_get_ex(item, "name", &field) && field) {
+            if (!model_value && json_object_object_get_ex(item, "provider_model_id", &field) && field &&
+                json_object_get_type(field) == json_type_string) {
+                model_value = json_object_get_string(field);
+            }
+            if (!model_value && json_object_object_get_ex(item, "id", &field) && field &&
+                json_object_get_type(field) == json_type_string) {
+                model_value = json_object_get_string(field);
+            }
+            if (json_object_object_get_ex(item, "name", &field) && field &&
+                json_object_get_type(field) == json_type_string) {
+                name_value = json_object_get_string(field);
+            } else if (json_object_object_get_ex(item, "display_name", &field) && field &&
+                       json_object_get_type(field) == json_type_string) {
+                name_value = json_object_get_string(field);
+            } else if (json_object_object_get_ex(item, "title", &field) && field &&
+                       json_object_get_type(field) == json_type_string) {
+                name_value = json_object_get_string(field);
+            } else if (json_object_object_get_ex(item, "label", &field) && field &&
+                       json_object_get_type(field) == json_type_string) {
                 name_value = json_object_get_string(field);
             }
         } else if (json_object_is_type(item, json_type_string)) {
@@ -669,6 +736,68 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
     json_object_put(parsed);
     free(chunk.memory);
     return 0;
+}
+
+static int fetch_available_models(const char *ollama_url, json_object **out_json, char **error_out) {
+    char *webui_url = build_webui_models_url(ollama_url);
+    char *fallback_url = build_ollama_tags_url(ollama_url);
+    char *webui_error = NULL;
+    char *fallback_error = NULL;
+    int rc = -1;
+
+    if (error_out) {
+        *error_out = NULL;
+    }
+
+    if (webui_url) {
+        rc = fetch_models_via_url(webui_url, out_json, &webui_error);
+        free(webui_url);
+        if (rc == 0) {
+            if (webui_error) {
+                free(webui_error);
+            }
+            if (fallback_url) {
+                free(fallback_url);
+            }
+            return 0;
+        }
+    } else {
+        webui_error = strdup("Failed to prepare Open WebUI models URL.");
+    }
+
+    if (fallback_url) {
+        rc = fetch_models_via_url(fallback_url, out_json, &fallback_error);
+        free(fallback_url);
+        if (rc == 0) {
+            if (webui_error) {
+                free(webui_error);
+            }
+            if (fallback_error) {
+                free(fallback_error);
+            }
+            return 0;
+        }
+    }
+
+    if (error_out) {
+        if (fallback_error) {
+            *error_out = fallback_error;
+            fallback_error = NULL;
+        } else if (webui_error) {
+            *error_out = webui_error;
+            webui_error = NULL;
+        } else {
+            *error_out = strdup("Unable to retrieve model list.");
+        }
+    }
+
+    if (webui_error) {
+        free(webui_error);
+    }
+    if (fallback_error) {
+        free(fallback_error);
+    }
+    return -1;
 }
 
 static void handle_models_request(int client_fd, const char *ollama_url) {
@@ -1145,7 +1274,17 @@ static const char *get_html_page(void) {
            "    .participant button { margin-top: 1rem; width: fit-content; background: rgba(15, 23, 42, 0.65); color: #f8fafc; border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 12px; padding: 0.5rem 1rem; letter-spacing: 0.05em; text-transform: none; font-size: 0.85rem; transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease; }\n"
            "    .participant button::after { display: none; }\n"
            "    .participant button:hover, .participant button:focus-visible { color: #f87171; border-color: rgba(248, 113, 113, 0.8); box-shadow: 0 0 20px rgba(248, 113, 113, 0.25); transform: translateY(-1px); }\n"
-           "    #status { margin-top: 1rem; font-weight: 600; color: #f97316; letter-spacing: 0.05em; opacity: 0; transform: translateY(-0.25rem); transition: opacity 0.35s ease, transform 0.35s ease; text-shadow: none; }\n"
+           "    .status-bar { margin-top: 1.25rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }\n"
+           "    .connection-flag { display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.35rem 0.85rem; border-radius: 999px; border: 1px solid rgba(148, 163, 184, 0.3); background: rgba(15, 23, 42, 0.55); color: rgba(226, 232, 240, 0.8); font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase; transition: border-color 0.3s ease, background 0.3s ease, color 0.3s ease, box-shadow 0.3s ease; }\n"
+           "    .connection-flag .connection-dot { width: 0.55rem; height: 0.55rem; border-radius: 999px; background: #fbbf24; box-shadow: 0 0 10px rgba(251, 191, 36, 0.4); transition: background 0.3s ease, box-shadow 0.3s ease; }\n"
+           "    .connection-flag.connection-connected { border-color: rgba(94, 234, 212, 0.75); background: rgba(13, 148, 136, 0.28); color: rgba(204, 251, 241, 0.95); box-shadow: 0 8px 24px rgba(13, 148, 136, 0.35); }\n"
+           "    .connection-flag.connection-connected .connection-dot { background: #34d399; box-shadow: 0 0 12px rgba(52, 211, 153, 0.6); }\n"
+           "    .connection-flag.connection-disconnected { border-color: rgba(248, 113, 113, 0.85); background: rgba(153, 27, 27, 0.28); color: rgba(254, 202, 202, 0.95); box-shadow: 0 8px 24px rgba(248, 113, 113, 0.35); }\n"
+           "    .connection-flag.connection-disconnected .connection-dot { background: #f87171; box-shadow: 0 0 12px rgba(248, 113, 113, 0.65); }\n"
+           "    .connection-flag.connection-checking { border-color: rgba(148, 163, 184, 0.45); background: rgba(30, 41, 59, 0.5); color: rgba(226, 232, 240, 0.82); box-shadow: 0 6px 18px rgba(15, 23, 42, 0.45); }\n"
+           "    .connection-flag.connection-checking .connection-dot { background: #fbbf24; box-shadow: 0 0 12px rgba(251, 191, 36, 0.5); }\n"
+           "    .connection-flag .connection-text { letter-spacing: 0.08em; }\n"
+           "    #status { font-weight: 600; color: #f97316; letter-spacing: 0.05em; opacity: 0; transform: translateY(-0.25rem); transition: opacity 0.35s ease, transform 0.35s ease; text-shadow: none; }\n"
            "    #status.status-active { opacity: 1; transform: translateY(0); }\n"
            "    #status.status-flash { animation: statusGlow 1.2s ease-out; }\n"
            "    @keyframes statusGlow {\n"
@@ -1172,7 +1311,7 @@ static const char *get_html_page(void) {
            "<body>\n"
            "  <div class=\"card\">\n"
            "    <h1>aiChat Arena</h1>\n"
-           "    <p>Configure friendly AI companions, pick their Ollama models, and watch them chat about your topic.</p>\n"
+           "    <p>Configure friendly AI companions, pick their Open WebUI models, and watch them chat about your topic.</p>\n"
            "    <label for=\"topic\">Conversation topic</label>\n"
            "    <input id=\"topic\" placeholder=\"Space exploration strategies\" />\n"
            "    <label for=\"turns\">Number of turns</label>\n"
@@ -1182,7 +1321,13 @@ static const char *get_html_page(void) {
            "      <button id=\"start\">Start conversation</button>\n"
            "    </div>\n"
            "    <div id=\"participants\" class=\"participants\"></div>\n"
-           "    <div id=\"status\"></div>\n"
+           "    <div class=\"status-bar\">\n"
+           "      <div id=\"connectionFlag\" class=\"connection-flag connection-checking\">\n"
+           "        <span class=\"connection-dot\"></span>\n"
+           "        <span class=\"connection-text\">Checking API...</span>\n"
+           "      </div>\n"
+           "      <div id=\"status\"></div>\n"
+           "    </div>\n"
            "  </div>\n"
            "  <div id=\"transcript\" class=\"log\" style=\"display:none;\">\n"
            "    <h2>Conversation transcript</h2>\n"
@@ -1191,6 +1336,9 @@ static const char *get_html_page(void) {
            "  <script>\n"
            "    const participantsEl = document.getElementById('participants');\n"
            "    const statusEl = document.getElementById('status');\n"
+           "    const connectionFlagEl = document.getElementById('connectionFlag');\n"
+           "    const connectionTextEl = connectionFlagEl ? connectionFlagEl.querySelector('.connection-text') : null;\n"
+           "    const MODEL_LOAD_ERROR_MESSAGE = 'Unable to load models from Open WebUI.';\n"
            "    statusEl.addEventListener('animationend', (event) => {\n"
            "      if (event.animationName === 'statusGlow') {\n"
            "        statusEl.classList.remove('status-flash');\n"
@@ -1209,6 +1357,26 @@ static const char *get_html_page(void) {
            "        statusEl.classList.remove('status-flash');\n"
            "      }\n"
            "    }\n"
+           "    function setConnectionState(state, message) {\n"
+           "      if (!connectionFlagEl || !connectionTextEl) {\n"
+           "        return;\n"
+           "      }\n"
+           "      const stateClasses = ['connection-checking', 'connection-connected', 'connection-disconnected'];\n"
+           "      stateClasses.forEach((cls) => connectionFlagEl.classList.remove(cls));\n"
+           "      let label = 'Checking API...';\n"
+           "      if (state === 'connected') {\n"
+           "        connectionFlagEl.classList.add('connection-connected');\n"
+           "        label = message && typeof message === 'string' && message ? message : 'API connected';\n"
+           "      } else if (state === 'disconnected') {\n"
+           "        connectionFlagEl.classList.add('connection-disconnected');\n"
+           "        label = message && typeof message === 'string' && message ? message : 'API unreachable';\n"
+           "      } else {\n"
+           "        connectionFlagEl.classList.add('connection-checking');\n"
+           "        label = message && typeof message === 'string' && message ? message : 'Checking API...';\n"
+           "      }\n"
+           "      connectionTextEl.textContent = label;\n"
+           "    }\n"
+           "    setConnectionState('checking');\n"
            "    const messagesEl = document.getElementById('messages');\n"
            "    const transcriptEl = document.getElementById('transcript');\n"
            "    const transcriptMessages = [];\n"
@@ -1604,9 +1772,10 @@ static const char *get_html_page(void) {
             "    }\n"
            "    async function loadModels() {\n"
            "      missingModelWarning = false;\n"
-          "      if (statusEl.textContent === 'A previously selected model is no longer available.') {\n"
-          "        setStatus('');\n"
-          "      }\n"
+           "      setConnectionState('checking');\n"
+           "      if (statusEl.textContent === 'A previously selected model is no longer available.') {\n"
+           "        setStatus('');\n"
+           "      }\n"
            "      try {\n"
            "        const response = await fetch('/models');\n"
            "        if (!response.ok) {\n"
@@ -1615,15 +1784,21 @@ static const char *get_html_page(void) {
            "        const payload = await response.json();\n"
            "        availableModels = Array.isArray(payload.models) ? payload.models : [];\n"
            "        modelLoadError = false;\n"
-          "        if (availableModels.length && statusEl.textContent === 'Unable to load models from Ollama.') {\n"
-          "          setStatus('');\n"
-          "        }\n"
+           "        if (availableModels.length && statusEl.textContent === MODEL_LOAD_ERROR_MESSAGE) {\n"
+           "          setStatus('');\n"
+           "        }\n"
+           "        if (availableModels.length > 0) {\n"
+           "          setConnectionState('connected', 'API connected');\n"
+           "        } else {\n"
+           "          setConnectionState('connected', 'API connected (no models found)');\n"
+           "        }\n"
            "      } catch (error) {\n"
            "        availableModels = [];\n"
            "        modelLoadError = true;\n"
-          "        if (!statusEl.textContent) {\n"
-          "          setStatus('Unable to load models from Ollama.');\n"
-          "        }\n"
+           "        setConnectionState('disconnected', 'API unreachable');\n"
+           "        if (!statusEl.textContent) {\n"
+           "          setStatus(MODEL_LOAD_ERROR_MESSAGE);\n"
+           "        }\n"
            "      }\n"
            "      refreshModelSelects();\n"
            "    }\n"
@@ -1633,7 +1808,7 @@ static const char *get_html_page(void) {
           "      wrapper.innerHTML = `\n"
           "        <label>Friendly name</label>\n"
           "        <input name=\"name\" placeholder=\"Astra\" value=\"${name || ''}\" />\n"
-          "        <label>Ollama model</label>\n"
+          "        <label>Open WebUI model</label>\n"
           "        <select name=\"model\"></select>\n"
           "        <button type=\"button\" class=\"remove\">Remove</button>\n"
           "      `;\n"
@@ -2254,7 +2429,7 @@ int main(void) {
     }
 
     printf("aiChat web server ready on http://127.0.0.1:%d\n", port);
-    printf("Using Ollama endpoint: %s\n", ollama_url);
+    printf("Using Open WebUI endpoint: %s\n", ollama_url);
     /* *** ADDED FOR OPEN WEBUI *** */
     if (!api_key) {
         fprintf(stderr, "Warning: WEBUI_API_KEY environment variable is not set. Requests will likely fail.\n");
