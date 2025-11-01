@@ -33,6 +33,7 @@
 #define DEFAULT_PORT 4000
 #define FALLBACK_PORT_STEPS 3
 #define READ_BUFFER_CHUNK 4096
+#define MAX_SEARCH_QUERY 256
 
 struct MemoryStruct {
     char *memory;
@@ -90,6 +91,637 @@ static const char *get_webui_key(void) {
 #endif
 
     return NULL;
+}
+
+static void trim_leading_whitespace(char *text);
+static void trim_trailing_whitespace(char *text);
+static char *append_to_history(char *history, const char *text);
+static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp);
+
+static const char *get_search_endpoint(void) {
+    static int initialised = 0;
+    static const char *cached = NULL;
+    const char *env_value = NULL;
+
+    if (!initialised) {
+        env_value = getenv("AICHAT_SEARCH_URL");
+        if (has_visible_text(env_value)) {
+            cached = env_value;
+        }
+        initialised = 1;
+    }
+
+    return cached;
+}
+
+static const char *get_search_api_key(void) {
+    static int initialised = 0;
+    static const char *cached = NULL;
+    const char *env_value = NULL;
+
+    if (!initialised) {
+        env_value = getenv("AICHAT_SEARCH_KEY");
+        if (has_visible_text(env_value)) {
+            cached = env_value;
+        }
+        initialised = 1;
+    }
+
+    return cached;
+}
+
+static const char *get_search_header_name(void) {
+    static int initialised = 0;
+    static const char *cached = NULL;
+    const char *env_value = NULL;
+
+    if (!initialised) {
+        env_value = getenv("AICHAT_SEARCH_HEADER");
+        if (has_visible_text(env_value)) {
+            cached = env_value;
+        }
+        initialised = 1;
+    }
+
+    return cached;
+}
+
+static const char *get_search_query_param(void) {
+    static int initialised = 0;
+    static const char *cached = "q";
+    const char *env_value = NULL;
+
+    if (!initialised) {
+        env_value = getenv("AICHAT_SEARCH_PARAM");
+        if (has_visible_text(env_value)) {
+            cached = env_value;
+        }
+        initialised = 1;
+    }
+
+    return cached;
+}
+
+static int is_search_configured(void) {
+    return get_search_endpoint() != NULL;
+}
+
+static char *duplicate_and_normalise_text(const char *text) {
+    size_t length = 0;
+    char *copy = NULL;
+    size_t index = 0;
+    int previous_space = 0;
+
+    if (!text) {
+        return NULL;
+    }
+
+    length = strlen(text);
+    copy = malloc(length + 1);
+    if (!copy) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char ch = (unsigned char)text[i];
+        if (isspace(ch)) {
+            if (!previous_space) {
+                copy[index++] = ' ';
+                previous_space = 1;
+            }
+        } else {
+            copy[index++] = (char)ch;
+            previous_space = 0;
+        }
+        if (index + 1 >= length + 1) {
+            break;
+        }
+    }
+
+    copy[index] = '\0';
+    trim_leading_whitespace(copy);
+    trim_trailing_whitespace(copy);
+    return copy;
+}
+
+static void build_search_query(const char *topic, const char *last_message, char *buffer, size_t buffer_size) {
+    const char *source = NULL;
+    size_t length = 0;
+    size_t index = 0;
+    int previous_space = 0;
+
+    if (!buffer || buffer_size == 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+
+    if (last_message && has_visible_text(last_message)) {
+        source = last_message;
+    } else if (topic && has_visible_text(topic)) {
+        source = topic;
+    }
+
+    if (!source) {
+        return;
+    }
+
+    length = strlen(source);
+    for (size_t i = 0; i < length && index + 1 < buffer_size; ++i) {
+        unsigned char ch = (unsigned char)source[i];
+        if (isspace(ch)) {
+            if (!previous_space && index > 0) {
+                buffer[index++] = ' ';
+                previous_space = 1;
+            }
+        } else {
+            buffer[index++] = (char)ch;
+            previous_space = 0;
+        }
+    }
+
+    buffer[index] = '\0';
+    trim_leading_whitespace(buffer);
+    trim_trailing_whitespace(buffer);
+}
+
+static char *extract_answer_snippet(json_object *object) {
+    static const char *const candidate_keys[] = {"answer", "summary", "abstract", "description", "text"};
+
+    if (!object) {
+        return NULL;
+    }
+
+    if (json_object_is_type(object, json_type_string)) {
+        return duplicate_and_normalise_text(json_object_get_string(object));
+    }
+
+    if (!json_object_is_type(object, json_type_object)) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < (sizeof(candidate_keys) / sizeof(candidate_keys[0])); ++i) {
+        json_object *value = NULL;
+        if (json_object_object_get_ex(object, candidate_keys[i], &value) && value) {
+            char *result = extract_answer_snippet(value);
+            if (result) {
+                return result;
+            }
+        }
+    }
+
+    json_object_object_foreach(object, key, val) {
+        (void)key;
+        if (!val) {
+            continue;
+        }
+        char *result = extract_answer_snippet(val);
+        if (result) {
+            return result;
+        }
+    }
+
+    return NULL;
+}
+
+static json_object *find_results_array(json_object *node) {
+    static const char *const preferred_keys[] = {"results", "data", "items", "organic_results", "value", "web", "webPages"};
+
+    if (!node) {
+        return NULL;
+    }
+
+    if (json_object_is_type(node, json_type_array)) {
+        return node;
+    }
+
+    if (!json_object_is_type(node, json_type_object)) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < (sizeof(preferred_keys) / sizeof(preferred_keys[0])); ++i) {
+        json_object *child = NULL;
+        if (json_object_object_get_ex(node, preferred_keys[i], &child) && child) {
+            if (json_object_is_type(child, json_type_array)) {
+                return child;
+            }
+            if (json_object_is_type(child, json_type_object)) {
+                json_object *nested = find_results_array(child);
+                if (nested) {
+                    return nested;
+                }
+            }
+        }
+    }
+
+    json_object_object_foreach(node, key, val) {
+        (void)key;
+        json_object *nested = find_results_array(val);
+        if (nested) {
+            return nested;
+        }
+    }
+
+    return NULL;
+}
+
+static const char *lookup_string_field(json_object *object, const char *const *keys, size_t key_count) {
+    for (size_t i = 0; i < key_count; ++i) {
+        json_object *value = NULL;
+        if (json_object_object_get_ex(object, keys[i], &value) && value &&
+            json_object_is_type(value, json_type_string)) {
+            const char *text = json_object_get_string(value);
+            if (has_visible_text(text)) {
+                return text;
+            }
+        }
+    }
+    return NULL;
+}
+
+static json_object *build_research_payload(json_object *parsed, const char *query) {
+    static const char *const title_keys[] = {"title", "name", "heading"};
+    static const char *const snippet_keys[] = {"snippet", "description", "summary", "content"};
+    static const char *const url_keys[] = {"url", "link", "href"};
+    json_object *payload = NULL;
+    json_object *results_array = NULL;
+    json_object *source_array = NULL;
+    size_t added = 0;
+
+    if (!parsed) {
+        return NULL;
+    }
+
+    payload = json_object_new_object();
+    if (!payload) {
+        return NULL;
+    }
+
+    results_array = json_object_new_array();
+    if (!results_array) {
+        json_object_put(payload);
+        return NULL;
+    }
+
+    json_object_object_add(payload, "results", results_array);
+    if (query && *query) {
+        json_object_object_add(payload, "query", json_object_new_string(query));
+    }
+
+    source_array = find_results_array(parsed);
+    if (source_array && json_object_is_type(source_array, json_type_array)) {
+        size_t length = json_object_array_length(source_array);
+        for (size_t i = 0; i < length; ++i) {
+            json_object *item = json_object_array_get_idx(source_array, i);
+            const char *title = NULL;
+            const char *snippet = NULL;
+            const char *url = NULL;
+            char *title_copy = NULL;
+            char *snippet_copy = NULL;
+            char *url_copy = NULL;
+            json_object *entry = NULL;
+
+            if (!item) {
+                continue;
+            }
+
+            if (json_object_is_type(item, json_type_object)) {
+                title = lookup_string_field(item, title_keys, sizeof(title_keys) / sizeof(title_keys[0]));
+                snippet = lookup_string_field(item, snippet_keys, sizeof(snippet_keys) / sizeof(snippet_keys[0]));
+                url = lookup_string_field(item, url_keys, sizeof(url_keys) / sizeof(url_keys[0]));
+            } else if (json_object_is_type(item, json_type_string)) {
+                snippet = json_object_get_string(item);
+            }
+
+            if ((!title || !*title) && (!snippet || !*snippet) && (!url || !*url)) {
+                continue;
+            }
+
+            entry = json_object_new_object();
+            if (!entry) {
+                continue;
+            }
+
+            if (title && *title) {
+                title_copy = duplicate_and_normalise_text(title);
+                if (title_copy && *title_copy) {
+                    json_object_object_add(entry, "title", json_object_new_string(title_copy));
+                }
+            }
+            if (snippet && *snippet) {
+                snippet_copy = duplicate_and_normalise_text(snippet);
+                if (snippet_copy && *snippet_copy) {
+                    json_object_object_add(entry, "snippet", json_object_new_string(snippet_copy));
+                }
+            }
+            if (url && *url) {
+                url_copy = duplicate_and_normalise_text(url);
+                if (url_copy && *url_copy) {
+                    json_object_object_add(entry, "url", json_object_new_string(url_copy));
+                }
+            }
+
+            free(title_copy);
+            free(snippet_copy);
+            free(url_copy);
+
+            if (json_object_object_length(entry) == 0) {
+                json_object_put(entry);
+                continue;
+            }
+
+            json_object_array_add(results_array, entry);
+            added++;
+
+            if (added >= 5) {
+                break;
+            }
+        }
+    }
+
+    json_object_object_add(payload, "resultCount", json_object_new_int((int)added));
+
+    char *answer_text = extract_answer_snippet(parsed);
+    if (answer_text && *answer_text) {
+        json_object_object_add(payload, "answer", json_object_new_string(answer_text));
+    }
+    free(answer_text);
+
+    return payload;
+}
+
+static char *format_research_notes(json_object *research) {
+    json_object *results = NULL;
+    json_object *answer_obj = NULL;
+    json_object *query_obj = NULL;
+    const char *answer_text = NULL;
+    const char *query_text = NULL;
+    size_t result_count = 0;
+    char *formatted = NULL;
+
+    if (!research) {
+        return NULL;
+    }
+
+    json_object_object_get_ex(research, "results", &results);
+    if (results && json_object_is_type(results, json_type_array)) {
+        result_count = json_object_array_length(results);
+    }
+
+    if (json_object_object_get_ex(research, "answer", &answer_obj) &&
+        answer_obj && json_object_is_type(answer_obj, json_type_string)) {
+        answer_text = json_object_get_string(answer_obj);
+    }
+
+    if (json_object_object_get_ex(research, "query", &query_obj) &&
+        query_obj && json_object_is_type(query_obj, json_type_string)) {
+        query_text = json_object_get_string(query_obj);
+    }
+
+    if ((!answer_text || !*answer_text) && result_count == 0) {
+        return NULL;
+    }
+
+    formatted = append_to_history(formatted, "Research notes from web search");
+    if (query_text && *query_text) {
+        formatted = append_to_history(formatted, " for \"");
+        formatted = append_to_history(formatted, query_text);
+        formatted = append_to_history(formatted, "\"");
+    }
+    formatted = append_to_history(formatted, ":\n");
+
+    if (answer_text && *answer_text) {
+        formatted = append_to_history(formatted, "- Summary: ");
+        formatted = append_to_history(formatted, answer_text);
+        formatted = append_to_history(formatted, "\n");
+    }
+
+    if (results && json_object_is_type(results, json_type_array)) {
+        size_t limit = result_count < 3 ? result_count : 3;
+        for (size_t i = 0; i < limit; ++i) {
+            json_object *item = json_object_array_get_idx(results, i);
+            json_object *field = NULL;
+            const char *title = NULL;
+            const char *snippet = NULL;
+            const char *url = NULL;
+            char index_buffer[32];
+
+            if (!item || !json_object_is_type(item, json_type_object)) {
+                continue;
+            }
+
+            if (json_object_object_get_ex(item, "title", &field) && field &&
+                json_object_is_type(field, json_type_string)) {
+                title = json_object_get_string(field);
+            }
+            if (json_object_object_get_ex(item, "snippet", &field) && field &&
+                json_object_is_type(field, json_type_string)) {
+                snippet = json_object_get_string(field);
+            }
+            if (json_object_object_get_ex(item, "url", &field) && field &&
+                json_object_is_type(field, json_type_string)) {
+                url = json_object_get_string(field);
+            }
+
+            if ((!title || !*title) && (!snippet || !*snippet) && (!url || !*url)) {
+                continue;
+            }
+
+            snprintf(index_buffer, sizeof(index_buffer), "%zu. ", i + 1);
+            formatted = append_to_history(formatted, index_buffer);
+
+            if (title && *title) {
+                formatted = append_to_history(formatted, title);
+            } else if (url && *url) {
+                formatted = append_to_history(formatted, url);
+            }
+
+            if (url && *url && title && *title) {
+                formatted = append_to_history(formatted, " — ");
+                formatted = append_to_history(formatted, url);
+            }
+
+            if (snippet && *snippet) {
+                if ((title && *title) || (url && *url)) {
+                    formatted = append_to_history(formatted, " — ");
+                }
+                formatted = append_to_history(formatted, snippet);
+            }
+
+            formatted = append_to_history(formatted, "\n");
+        }
+    }
+
+    return formatted;
+}
+
+static int perform_web_search(const char *query, json_object **out_payload, char **out_notes) {
+    struct MemoryStruct chunk = {0};
+    CURL *curl = NULL;
+    CURLcode res;
+    char *encoded_query = NULL;
+    char *request_url = NULL;
+    const char *endpoint = get_search_endpoint();
+    const char *api_key = get_search_api_key();
+    const char *header_name = get_search_header_name();
+    const char *query_param = get_search_query_param();
+    struct curl_slist *headers = NULL;
+    long status_code = 0;
+    json_object *parsed = NULL;
+    json_object *payload = NULL;
+    char *notes = NULL;
+
+    if (out_payload) {
+        *out_payload = NULL;
+    }
+    if (out_notes) {
+        *out_notes = NULL;
+    }
+
+    if (!endpoint || !query || !*query) {
+        return -1;
+    }
+
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
+    if (!curl) {
+        curl_global_cleanup();
+        return -1;
+    }
+
+    chunk.memory = malloc(1);
+    if (!chunk.memory) {
+        curl_easy_cleanup(curl);
+        curl_global_cleanup();
+        return -1;
+    }
+    chunk.size = 0;
+
+    encoded_query = curl_easy_escape(curl, query, 0);
+    if (!encoded_query) {
+        curl_easy_cleanup(curl);
+        curl_global_cleanup();
+        free(chunk.memory);
+        return -1;
+    }
+
+    if (strstr(endpoint, "%s")) {
+        if (asprintf(&request_url, endpoint, encoded_query) == -1) {
+            request_url = NULL;
+        }
+    } else {
+        const char *separator = strchr(endpoint, '?') ? "&" : "?";
+        if (asprintf(&request_url, "%s%s%s=%s", endpoint, separator,
+                     query_param ? query_param : "q", encoded_query) == -1) {
+            request_url = NULL;
+        }
+    }
+
+    curl_free(encoded_query);
+
+    if (!request_url) {
+        curl_easy_cleanup(curl);
+        curl_global_cleanup();
+        free(chunk.memory);
+        return -1;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, request_url);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+
+    if (api_key && *api_key) {
+        char header_buffer[512];
+        const char *name = header_name && *header_name ? header_name : "Authorization";
+        if (strcasecmp(name, "Authorization") == 0 && strncasecmp(api_key, "Bearer ", 7) != 0) {
+            snprintf(header_buffer, sizeof(header_buffer), "%s: Bearer %s", name, api_key);
+        } else {
+            snprintf(header_buffer, sizeof(header_buffer), "%s: %s", name, api_key);
+        }
+        headers = curl_slist_append(headers, header_buffer);
+        if (headers) {
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        }
+    }
+
+    fprintf(stdout, "Running web search for query: %s\n", query);
+
+    res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        fprintf(stderr, "Search request failed: %s\n", curl_easy_strerror(res));
+        goto cleanup;
+    }
+
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status_code);
+    if (status_code >= 400) {
+        fprintf(stderr, "Search request returned HTTP %ld.\n", status_code);
+        goto cleanup;
+    }
+
+    if (!chunk.memory || chunk.size == 0) {
+        goto cleanup;
+    }
+
+    parsed = json_tokener_parse(chunk.memory);
+    if (!parsed) {
+        fprintf(stderr, "Failed to parse search response.\n");
+        goto cleanup;
+    }
+
+    payload = build_research_payload(parsed, query);
+    if (!payload) {
+        goto cleanup;
+    }
+
+    notes = format_research_notes(payload);
+
+    int has_data = 0;
+    if (notes && *notes) {
+        has_data = 1;
+    } else {
+        json_object *count_obj = NULL;
+        json_object *answer_obj = NULL;
+        if (json_object_object_get_ex(payload, "resultCount", &count_obj) && count_obj &&
+            json_object_is_type(count_obj, json_type_int) && json_object_get_int(count_obj) > 0) {
+            has_data = 1;
+        } else if (json_object_object_get_ex(payload, "answer", &answer_obj) && answer_obj &&
+                   json_object_is_type(answer_obj, json_type_string) &&
+                   has_visible_text(json_object_get_string(answer_obj))) {
+            has_data = 1;
+        }
+    }
+
+    if (has_data) {
+        if (out_payload) {
+            json_object_get(payload);
+            *out_payload = payload;
+        }
+        if (out_notes && notes) {
+            *out_notes = notes;
+            notes = NULL;
+        }
+    }
+
+cleanup:
+    if (notes) {
+        free(notes);
+    }
+    if (payload) {
+        json_object_put(payload);
+    }
+    if (parsed) {
+        json_object_put(parsed);
+    }
+    if (headers) {
+        curl_slist_free_all(headers);
+    }
+    curl_easy_cleanup(curl);
+    curl_global_cleanup();
+    free(request_url);
+    free(chunk.memory);
+
+    return has_data ? 0 : -1;
 }
 
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -909,6 +1541,11 @@ static void handle_diagnostics_request(int client_fd, const char *ollama_url) {
     }
 
     json_object_object_add(payload, "usesApiKey", json_object_new_boolean(api_key != NULL));
+    const char *search_endpoint = get_search_endpoint();
+    const char *search_key = get_search_api_key();
+    json_object_object_add(payload, "searchConfigured", json_object_new_boolean(search_endpoint != NULL));
+    json_object_object_add(payload, "searchEndpoint", json_object_new_string(search_endpoint ? search_endpoint : ""));
+    json_object_object_add(payload, "searchUsesApiKey", json_object_new_boolean(search_key != NULL));
 
     const char *json_payload = json_object_to_json_string_ext(payload, JSON_C_TO_STRING_PLAIN);
     send_http_response(client_fd, "200 OK", "application/json", json_payload);
@@ -990,12 +1627,15 @@ static void ensure_participant_display_models(struct Participant *participants, 
 }
 
 static int run_conversation(const char *topic, int turns, struct Participant *participants,
-                            size_t participant_count, const char *ollama_url, message_callback on_message,
-                            void *callback_data, json_object **out_json, char **error_out) {
+                            size_t participant_count, const char *ollama_url, int search_enabled,
+                            message_callback on_message, void *callback_data, json_object **out_json,
+                            char **error_out) {
     char *conversation_history = NULL;
     json_object *messages = NULL;
     json_object *participants_json = NULL;
     json_object *result = NULL;
+    char *last_turn_text = NULL;
+    int use_search = search_enabled && is_search_configured();
 
     *out_json = NULL;
     if (error_out) {
@@ -1056,7 +1696,11 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
         for (size_t idx = 0; idx < participant_count; ++idx) {
             char label[128];
             char *response = NULL;
+            char *response_copy = NULL;
             json_object *message = NULL;
+            json_object *research_payload = NULL;
+            char *research_notes = NULL;
+            char query_buffer[MAX_SEARCH_QUERY];
 
             snprintf(label, sizeof(label), "\n\n%s:", participants[idx].name);
             conversation_history = append_to_history(conversation_history, label);
@@ -1065,6 +1709,58 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
                     *error_out = strdup("Failed to build conversation history.");
                 }
                 goto fail;
+            }
+
+            if (use_search) {
+                build_search_query(topic, last_turn_text, query_buffer, sizeof(query_buffer));
+                if (query_buffer[0] != '\0') {
+                    if (perform_web_search(query_buffer, &research_payload, &research_notes) == 0) {
+                        if (research_notes && *research_notes) {
+                            conversation_history = append_to_history(conversation_history, "\n\n");
+                            if (!conversation_history) {
+                                if (error_out) {
+                                    *error_out = strdup("Failed to build conversation history.");
+                                }
+                                if (research_payload) {
+                                    json_object_put(research_payload);
+                                }
+                                free(research_notes);
+                                goto fail;
+                            }
+                            conversation_history = append_to_history(conversation_history, research_notes);
+                            if (!conversation_history) {
+                                if (error_out) {
+                                    *error_out = strdup("Failed to build conversation history.");
+                                }
+                                if (research_payload) {
+                                    json_object_put(research_payload);
+                                }
+                                free(research_notes);
+                                goto fail;
+                            }
+                            conversation_history = append_to_history(conversation_history, "\n");
+                            if (!conversation_history) {
+                                if (error_out) {
+                                    *error_out = strdup("Failed to build conversation history.");
+                                }
+                                if (research_payload) {
+                                    json_object_put(research_payload);
+                                }
+                                free(research_notes);
+                                goto fail;
+                            }
+                        }
+                    } else {
+                        if (research_payload) {
+                            json_object_put(research_payload);
+                            research_payload = NULL;
+                        }
+                        if (research_notes) {
+                            free(research_notes);
+                            research_notes = NULL;
+                        }
+                    }
+                }
             }
 
             response = get_ai_response(conversation_history, participants[idx].model,
@@ -1083,8 +1779,25 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
             conversation_history = append_to_history(conversation_history, response);
             if (!conversation_history) {
                 free(response);
+                if (research_payload) {
+                    json_object_put(research_payload);
+                }
+                free(research_notes);
                 if (error_out) {
                     *error_out = strdup("Failed to build conversation history.");
+                }
+                goto fail;
+            }
+
+            response_copy = strdup(response);
+            if (!response_copy) {
+                free(response);
+                if (research_payload) {
+                    json_object_put(research_payload);
+                }
+                free(research_notes);
+                if (error_out) {
+                    *error_out = strdup("Failed to record model response.");
                 }
                 goto fail;
             }
@@ -1092,9 +1805,14 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
             message = json_object_new_object();
             if (!message) {
                 free(response);
+                free(response_copy);
                 if (error_out) {
                     *error_out = strdup("Failed to allocate message JSON.");
                 }
+                if (research_payload) {
+                    json_object_put(research_payload);
+                }
+                free(research_notes);
                 goto fail;
             }
 
@@ -1107,6 +1825,10 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
                                        json_object_new_string(participants[idx].display_model));
             }
             json_object_object_add(message, "text", json_object_new_string(response));
+            if (research_payload) {
+                json_object_object_add(message, "research", research_payload);
+                research_payload = NULL;
+            }
             json_object_array_add(messages, message);
 
             if (on_message) {
@@ -1114,6 +1836,8 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
                 if (on_message(message, callback_data) != 0) {
                     json_object_put(message);
                     free(response);
+                    free(response_copy);
+                    free(research_notes);
                     if (error_out && (!*error_out)) {
                         *error_out = strdup("Failed to stream message.");
                     }
@@ -1122,6 +1846,16 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
                 json_object_put(message);
             }
 
+            if (research_notes) {
+                free(research_notes);
+                research_notes = NULL;
+            }
+
+            if (last_turn_text) {
+                free(last_turn_text);
+            }
+            last_turn_text = response_copy;
+            response_copy = NULL;
             free(response);
         }
     }
@@ -1139,8 +1873,10 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
     json_object_object_add(result, "participants", participants_json);
     json_object_object_add(result, "messages", messages);
     json_object_object_add(result, "history", json_object_new_string(conversation_history));
+    json_object_object_add(result, "searchEnabled", json_object_new_boolean(use_search));
 
     free(conversation_history);
+    free(last_turn_text);
     *out_json = result;
     return 0;
 
@@ -1155,6 +1891,7 @@ fail:
         json_object_put(result);
     }
     free(conversation_history);
+    free(last_turn_text);
     return -1;
 }
 
@@ -1349,6 +2086,15 @@ static const char *get_html_page(void) {
            "    input:focus, select:focus { outline: none; border-color: rgba(94, 234, 212, 0.8); box-shadow: 0 0 0 3px rgba(94, 234, 212, 0.2); transform: translateY(-1px); }\n"
            "    input::placeholder { color: rgba(148, 163, 184, 0.6); }\n"
            "    .actions { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 1.5rem; }\n"
+           "    .search-control { margin-top: 1.25rem; }\n"
+           "    .form-toggle { display: flex; align-items: center; gap: 0.75rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(148, 163, 184, 0.88); transition: opacity 0.2s ease; }\n"
+           "    .form-toggle.is-disabled { opacity: 0.6; }\n"
+           "    .form-toggle span { text-transform: none; letter-spacing: 0.03em; color: rgba(226, 232, 240, 0.9); }\n"
+           "    .form-toggle input { width: 1.2rem; height: 1.2rem; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.35); background: rgba(15, 23, 42, 0.6); cursor: pointer; accent-color: #38bdf8; }\n"
+           "    .form-toggle input:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(94, 234, 212, 0.25); }\n"
+           "    .form-hint { margin-top: 0.35rem; font-size: 0.85rem; color: rgba(148, 163, 184, 0.78); letter-spacing: 0.02em; }\n"
+           "    .form-hint.is-warning { color: rgba(248, 113, 113, 0.85); }\n"
+           "    .form-hint.is-active { color: rgba(94, 234, 212, 0.88); }\n"
            "    button { position: relative; padding: 0.85rem 1.8rem; border: none; border-radius: 999px; background: linear-gradient(120deg, #22d3ee, #a855f7); background-size: 220% 220%; color: #0b1120; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; transition: transform 0.25s ease, box-shadow 0.25s ease, background-position 0.4s ease; box-shadow: 0 12px 26px rgba(168, 85, 247, 0.35); }\n"
            "    button::after { content: ''; position: absolute; inset: -2px; border-radius: inherit; border: 1px solid rgba(255, 255, 255, 0.25); opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; pointer-events: none; }\n"
            "    button:hover { transform: translateY(-2px); box-shadow: 0 20px 45px rgba(168, 85, 247, 0.45); background-position: 100% 50%; }\n"
@@ -1414,6 +2160,14 @@ static const char *get_html_page(void) {
            "      100% { box-shadow: 0 12px 28px var(--message-glow, rgba(15, 23, 42, 0.6)); }\n"
            "    }\n"
            "    .message strong { display: block; margin-bottom: 0.35rem; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(226, 232, 240, 0.92); }\n"
+           "    .research-notes { margin-top: 0.75rem; padding: 0.75rem 1rem; border-radius: 12px; background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(94, 234, 212, 0.35); box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.18); }\n"
+           "    .research-notes strong { display: block; margin-bottom: 0.5rem; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(94, 234, 212, 0.9); font-size: 0.85rem; }\n"
+           "    .research-notes ul { margin: 0; padding-left: 1.15rem; list-style: decimal; color: rgba(226, 232, 240, 0.92); }\n"
+           "    .research-notes li { margin-bottom: 0.35rem; }\n"
+           "    .research-notes li:last-child { margin-bottom: 0; }\n"
+           "    .research-notes a { color: #38bdf8; text-decoration: none; }\n"
+           "    .research-notes a:hover { text-decoration: underline; }\n"
+           "    .research-notes p { margin: 0 0 0.5rem 0; color: rgba(226, 232, 240, 0.85); }\n"
            "  </style>\n"
            "</head>\n"
            "<body>\n"
@@ -1424,6 +2178,13 @@ static const char *get_html_page(void) {
            "    <input id=\"topic\" placeholder=\"Space exploration strategies\" />\n"
            "    <label for=\"turns\">Number of turns</label>\n"
            "    <input id=\"turns\" type=\"number\" min=\"1\" max=\"12\" value=\"3\" />\n"
+           "    <div class=\"search-control\">\n"
+           "      <label class=\"form-toggle\">\n"
+           "        <input id=\"enableSearch\" type=\"checkbox\" />\n"
+           "        <span>Use web search between turns</span>\n"
+           "      </label>\n"
+           "      <p id=\"searchHelper\" class=\"form-hint\">Enable to gather web research between turns.</p>\n"
+           "    </div>\n"
            "    <div class=\"actions\">\n"
            "      <button id=\"addParticipant\">Add participant</button>\n"
            "      <button id=\"start\">Start conversation</button>\n"
@@ -1458,6 +2219,10 @@ static const char *get_html_page(void) {
            "    const diagnosticsSummaryEl = document.getElementById('diagnosticsSummary');\n"
            "    const diagnosticsCurlEl = document.getElementById('diagnosticsCurl');\n"
            "    const diagnosticsNotesEl = document.getElementById('diagnosticsNotes');\n"
+           "    const enableSearchInput = document.getElementById('enableSearch');\n"
+           "    const searchToggleLabel = enableSearchInput ? enableSearchInput.closest('.form-toggle') : null;\n"
+           "    const searchHelperEl = document.getElementById('searchHelper');\n"
+           "    const searchState = { configured: false, requested: false, active: false };\n"
            "    const MODEL_LOAD_ERROR_MESSAGE = 'Unable to load models from Open WebUI. Expand the troubleshooting tips below for commands you can try.';\n"
            "    const MODEL_LOAD_ERROR_KEY = 'model-load-error';\n"
            "    let diagnosticsInfo = null;\n"
@@ -1512,6 +2277,51 @@ static const char *get_html_page(void) {
            "      }\n"
            "      updateDiagnosticsPanel(state);\n"
            "    }\n"
+           "    function updateSearchHelper() {\n"
+           "      if (!searchHelperEl) {\n"
+           "        return;\n"
+           "      }\n"
+           "      const configured = Boolean(searchState.configured);\n"
+           "      const requested = Boolean(searchState.requested);\n"
+           "      const active = Boolean(searchState.active);\n"
+           "      searchHelperEl.classList.remove('is-warning', 'is-active');\n"
+           "      if (searchToggleLabel) {\n"
+           "        searchToggleLabel.classList.toggle('is-disabled', !configured);\n"
+           "      }\n"
+           "      if (enableSearchInput) {\n"
+           "        if (!configured) {\n"
+           "          enableSearchInput.setAttribute('aria-disabled', 'true');\n"
+           "        } else {\n"
+           "          enableSearchInput.removeAttribute('aria-disabled');\n"
+           "        }\n"
+           "      }\n"
+           "      if (!configured) {\n"
+           "        searchHelperEl.textContent = requested\n"
+           "          ? 'Web search is not configured on the server yet. Set AICHAT_SEARCH_URL to enable this toggle.'\n"
+           "          : 'Set AICHAT_SEARCH_URL on the server to enable web search.';\n"
+           "        searchHelperEl.classList.add('is-warning');\n"
+           "        return;\n"
+           "      }\n"
+           "      if (active) {\n"
+           "        searchHelperEl.textContent = 'Web search is active for this conversation.';\n"
+           "        searchHelperEl.classList.add('is-active');\n"
+           "        return;\n"
+           "      }\n"
+           "      if (requested) {\n"
+           "        searchHelperEl.textContent = 'Web search will run during the next conversation.';\n"
+           "        searchHelperEl.classList.add('is-active');\n"
+           "        return;\n"
+           "      }\n"
+           "      searchHelperEl.textContent = 'Enable to gather web research between turns.';\n"
+           "    }\n"
+           "    if (enableSearchInput) {\n"
+           "      searchState.requested = enableSearchInput.checked;\n"
+           "      enableSearchInput.addEventListener('change', () => {\n"
+           "        searchState.requested = enableSearchInput.checked;\n"
+           "        updateSearchHelper();\n"
+           "      });\n"
+           "    }\n"
+           "    updateSearchHelper();\n"
            "    setConnectionState('checking');\n"
            "    function updateDiagnosticsPanel(state) {\n"
            "      if (!diagnosticsDetailsEl) {\n"
@@ -1522,7 +2332,15 @@ static const char *get_html_page(void) {
            "      const fallbackUrl = typeof info.fallbackUrl === 'string' ? info.fallbackUrl.trim() : '';\n"
            "      const endpoint = typeof info.webuiEndpoint === 'string' ? info.webuiEndpoint.trim() : '';\n"
            "      const usesApiKey = Boolean(info.usesApiKey);\n"
+           "      const searchConfigured = Boolean(info.searchConfigured);\n"
+           "      const searchEndpoint = typeof info.searchEndpoint === 'string' ? info.searchEndpoint.trim() : '';\n"
+           "      const searchUsesKey = Boolean(info.searchUsesApiKey);\n"
            "      const preferredUrl = modelsUrl || fallbackUrl;\n"
+           "      if (!searchState.active && enableSearchInput) {\n"
+           "        searchState.requested = enableSearchInput.checked;\n"
+           "      }\n"
+           "      searchState.configured = searchConfigured;\n"
+           "      updateSearchHelper();\n"
            "      if (diagnosticsSummaryEl) {\n"
            "        const parts = [];\n"
            "        if (modelsUrl) {\n"
@@ -1535,6 +2353,11 @@ static const char *get_html_page(void) {
            "        }\n"
            "        if (endpoint) {\n"
            "          parts.push(`Conversations will be sent to: ${endpoint}.`);\n"
+           "        }\n"
+           "        if (searchConfigured) {\n"
+           "          parts.push(`Web search endpoint: ${searchEndpoint || 'configured via AICHAT_SEARCH_URL'}.`);\n"
+           "        } else {\n"
+           "          parts.push('Web search helper is disabled (set AICHAT_SEARCH_URL to enable it).');\n"
            "        }\n"
            "        diagnosticsSummaryEl.textContent = parts.join(' ');\n"
            "      }\n"
@@ -1555,7 +2378,16 @@ static const char *get_html_page(void) {
            "      }\n"
            "      if (diagnosticsNotesEl) {\n"
            "        const targetHint = preferredUrl || endpoint || 'your Open WebUI host';\n"
-           "        diagnosticsNotesEl.textContent = `Run the command above from the machine hosting aiChat to confirm ${targetHint} is reachable. If it fails, adjust the OLLAMA_URL (currently ${endpoint || 'not set'}) or check your firewall.`;\n"
+           "        let notesText = `Run the command above from the machine hosting aiChat to confirm ${targetHint} is reachable. If it fails, adjust the OLLAMA_URL (currently ${endpoint || 'not set'}) or check your firewall.`;\n"
+           "        if (searchConfigured) {\n"
+           "          notesText += ` Web search calls ${searchEndpoint || 'the URL provided in AICHAT_SEARCH_URL'}.`;\n"
+           "          if (searchUsesKey) {\n"
+           "            notesText += ' Remember to export AICHAT_SEARCH_KEY for providers that require authentication.';\n"
+           "          }\n"
+           "        } else {\n"
+           "          notesText += ' Set AICHAT_SEARCH_URL to enable web research snippets between turns.';\n"
+           "        }\n"
+           "        diagnosticsNotesEl.textContent = notesText;\n"
            "      }\n"
            "    }\n"
            "    async function loadDiagnosticsInfo() {\n"
@@ -1800,11 +2632,79 @@ static const char *get_html_page(void) {
           "        card.style.setProperty('--participant-highlight', palette.border || 'rgba(148, 163, 184, 0.8)');\n"
           "      });\n"
           "    }\n"
-           "    function appendMessage(message) {\n"
-           "      if (!message || typeof message !== 'object') {\n"
-           "        return;\n"
+           "    function renderResearchNotes(research) {\n"
+           "      if (!research || typeof research !== 'object') {\n"
+           "        return '';\n"
            "      }\n"
-           "      const item = document.createElement('div');\n"
+           "      const results = Array.isArray(research.results) ? research.results : [];\n"
+           "      const answer = typeof research.answer === 'string' ? research.answer.trim() : '';\n"
+           "      const query = typeof research.query === 'string' ? research.query.trim() : '';\n"
+           "      if (!results.length && !answer) {\n"
+           "        return '';\n"
+           "      }\n"
+           "      const wrapper = document.createElement('div');\n"
+           "      wrapper.className = 'research-notes';\n"
+           "      const heading = document.createElement('strong');\n"
+           "      heading.textContent = query ? `Research notes for \"${query}\"` : 'Research notes';\n"
+           "      wrapper.appendChild(heading);\n"
+           "      if (answer) {\n"
+           "        const summary = document.createElement('p');\n"
+           "        summary.textContent = `Summary: ${answer}`;\n"
+           "        wrapper.appendChild(summary);\n"
+           "      }\n"
+           "      if (results.length) {\n"
+           "        const list = document.createElement('ul');\n"
+           "        results.slice(0, 3).forEach((entry) => {\n"
+           "          if (!entry || typeof entry !== 'object') {\n"
+           "            return;\n"
+           "          }\n"
+           "          const title = typeof entry.title === 'string' ? entry.title.trim() : '';\n"
+           "          const snippet = typeof entry.snippet === 'string' ? entry.snippet.trim() : '';\n"
+           "          const url = typeof entry.url === 'string' ? entry.url.trim() : '';\n"
+           "          if (!title && !snippet && !url) {\n"
+           "            return;\n"
+           "          }\n"
+           "          const item = document.createElement('li');\n"
+           "          if (title) {\n"
+           "            if (url) {\n"
+           "              const link = document.createElement('a');\n"
+           "              link.href = url;\n"
+           "              link.target = '_blank';\n"
+           "              link.rel = 'noreferrer noopener';\n"
+           "              link.textContent = title;\n"
+           "              item.appendChild(link);\n"
+           "            } else {\n"
+           "              item.appendChild(document.createTextNode(title));\n"
+           "            }\n"
+           "          } else if (url) {\n"
+           "            const link = document.createElement('a');\n"
+           "            link.href = url;\n"
+           "            link.target = '_blank';\n"
+           "            link.rel = 'noreferrer noopener';\n"
+           "            link.textContent = url;\n"
+           "            item.appendChild(link);\n"
+           "          }\n"
+           "          if (snippet) {\n"
+           "            if (item.childNodes.length) {\n"
+           "              item.appendChild(document.createTextNode(' — '));\n"
+           "            }\n"
+           "            item.appendChild(document.createTextNode(snippet));\n"
+           "          }\n"
+           "          list.appendChild(item);\n"
+           "        });\n"
+           "        if (list.children.length) {\n"
+           "          wrapper.appendChild(list);\n"
+           "        }\n"
+           "      }\n"
+           "      const temp = document.createElement('div');\n"
+           "      temp.appendChild(wrapper);\n"
+           "      return temp.innerHTML;\n"
+           "    }\n"
+           "    function appendMessage(message) {\n"
+            "      if (!message || typeof message !== 'object') {\n"
+            "        return;\n"
+            "      }\n"
+            "      const item = document.createElement('div');\n"
            "      item.className = 'message message-enter';\n"
            "      if (message.isSummary) {\n"
            "        item.classList.add('message-summary');\n"
@@ -1828,7 +2728,9 @@ static const char *get_html_page(void) {
            "      const header = modelLabel\n"
            "        ? `<strong>${message.name} <span style=\"color:#94a3b8; font-weight:400;\">(${modelLabel})</span></strong>`\n"
            "        : `<strong>${message.name}</strong>`;\n"
-           "      item.innerHTML = `${header}${message.text}`;\n"
+           "      const bodyText = typeof message.text === 'string' ? message.text : '';\n"
+           "      const researchHtml = renderResearchNotes(message.research);\n"
+           "      item.innerHTML = `${header}${bodyText}${researchHtml}`;\n"
           "      messagesEl.appendChild(item);\n"
           "      recordTranscriptMessage(message);\n"
           "      item.addEventListener('animationend', (event) => {\n"
@@ -2067,13 +2969,18 @@ static const char *get_html_page(void) {
           "        setStatus('Add at least one participant with a model selected.');\n"
           "        return;\n"
           "      }\n"
-          "      resetTranscriptState(topic, turns, participants);\n"
-          "      setStatus('Starting conversation...');\n"
+           "      resetTranscriptState(topic, turns, participants);\n"
+           "      setStatus('Starting conversation...');\n"
+           "      searchState.active = false;\n"
+           "      if (enableSearchInput) {\n"
+           "        searchState.requested = enableSearchInput.checked;\n"
+           "      }\n"
+           "      updateSearchHelper();\n"
            "      try {\n"
            "        const response = await fetch('/chat', {\n"
            "          method: 'POST',\n"
            "          headers: { 'Content-Type': 'application/json' },\n"
-           "          body: JSON.stringify({ topic, turns, participants })\n"
+           "          body: JSON.stringify({ topic, turns, participants, enableSearch: enableSearchInput ? enableSearchInput.checked : false })\n"
            "        });\n"
           "        if (!response.ok) {\n"
           "          let payload = null;\n"
@@ -2118,39 +3025,64 @@ static const char *get_html_page(void) {
            "            } catch (parseError) {\n"
            "              continue;\n"
            "            }\n"
-          "            if (eventPayload.type === 'start') {\n"
-          "              const participantsList = Array.isArray(eventPayload.participants) ? eventPayload.participants : [];\n"
-          "              assignParticipantStyles(participantsList);\n"
-          "              currentParticipants = normaliseParticipants(participantsList);\n"
-          "              if (typeof eventPayload.topic === 'string') {\n"
-          "                currentTopic = eventPayload.topic;\n"
-          "              }\n"
-          "              if (Number.isFinite(eventPayload.turns)) {\n"
-          "                currentTurns = eventPayload.turns;\n"
-          "              }\n"
-          "              setStatus('Conversation in progress...');\n"
+           "            if (eventPayload.type === 'start') {\n"
+           "              const participantsList = Array.isArray(eventPayload.participants) ? eventPayload.participants : [];\n"
+           "              assignParticipantStyles(participantsList);\n"
+           "              currentParticipants = normaliseParticipants(participantsList);\n"
+           "              if (typeof eventPayload.topic === 'string') {\n"
+           "                currentTopic = eventPayload.topic;\n"
+           "              }\n"
+           "              if (Number.isFinite(eventPayload.turns)) {\n"
+           "                currentTurns = eventPayload.turns;\n"
+           "              }\n"
+           "              if (typeof eventPayload.searchConfigured === 'boolean') {\n"
+           "                searchState.configured = eventPayload.searchConfigured;\n"
+           "              }\n"
+           "              if (typeof eventPayload.searchRequested === 'boolean') {\n"
+           "                searchState.requested = eventPayload.searchRequested;\n"
+           "                if (enableSearchInput) {\n"
+           "                  enableSearchInput.checked = eventPayload.searchRequested;\n"
+           "                }\n"
+           "              }\n"
+           "              if (typeof eventPayload.searchEnabled === 'boolean') {\n"
+           "                searchState.active = Boolean(eventPayload.searchEnabled);\n"
+           "              } else {\n"
+           "                searchState.active = false;\n"
+           "              }\n"
+           "              updateSearchHelper();\n"
+           "              setStatus('Conversation in progress...');\n"
           "            } else if (eventPayload.type === 'message' && eventPayload.message) {\n"
           "              appendMessage(eventPayload.message);\n"
           "              setStatus(`Responding: ${eventPayload.message.name}`);\n"
-          "            } else if (eventPayload.type === 'error') {\n"
-          "              const errorMessage = eventPayload.message && typeof eventPayload.message === 'string' && eventPayload.message\n"
-          "                ? eventPayload.message\n"
-          "                : 'The conversation failed.';\n"
-          "              encounteredError = true;\n"
-          "              setStatus(errorMessage);\n"
-          "              stopStreaming = true;\n"
-          "              break;\n"
-          "            } else if (eventPayload.type === 'complete') {\n"
-          "              if (typeof eventPayload.topic === 'string') {\n"
-          "                currentTopic = eventPayload.topic;\n"
-          "              }\n"
-          "              if (Number.isFinite(eventPayload.turns)) {\n"
-          "                currentTurns = eventPayload.turns;\n"
-          "              }\n"
-          "              summariseDiscussionIfNeeded();\n"
-          "              setStatus('Conversation complete.');\n"
-          "              stopStreaming = true;\n"
-          "              break;\n"
+           "            } else if (eventPayload.type === 'error') {\n"
+           "              const errorMessage = eventPayload.message && typeof eventPayload.message === 'string' && eventPayload.message\n"
+           "                ? eventPayload.message\n"
+           "                : 'The conversation failed.';\n"
+           "              searchState.active = false;\n"
+           "              if (enableSearchInput) {\n"
+           "                searchState.requested = enableSearchInput.checked;\n"
+           "              }\n"
+           "              updateSearchHelper();\n"
+           "              encounteredError = true;\n"
+           "              setStatus(errorMessage);\n"
+           "              stopStreaming = true;\n"
+           "              break;\n"
+           "            } else if (eventPayload.type === 'complete') {\n"
+           "              if (typeof eventPayload.topic === 'string') {\n"
+           "                currentTopic = eventPayload.topic;\n"
+           "              }\n"
+           "              if (Number.isFinite(eventPayload.turns)) {\n"
+           "                currentTurns = eventPayload.turns;\n"
+           "              }\n"
+           "              searchState.active = false;\n"
+           "              if (enableSearchInput) {\n"
+           "                searchState.requested = enableSearchInput.checked;\n"
+           "              }\n"
+           "              updateSearchHelper();\n"
+           "              summariseDiscussionIfNeeded();\n"
+           "              setStatus('Conversation complete.');\n"
+           "              stopStreaming = true;\n"
+           "              break;\n"
           "            }\n"
            "          }\n"
            "          if (stopStreaming) {\n"
@@ -2188,9 +3120,19 @@ static const char *get_html_page(void) {
            "        if (!encounteredError) {\n"
            "          summariseDiscussionIfNeeded();\n"
            "        }\n"
-          "      } catch (error) {\n"
-          "        setStatus('Unable to reach the aiChat server.');\n"
-          "      }\n"
+           "        searchState.active = false;\n"
+           "        if (enableSearchInput) {\n"
+           "          searchState.requested = enableSearchInput.checked;\n"
+           "        }\n"
+           "        updateSearchHelper();\n"
+           "      } catch (error) {\n"
+           "        setStatus('Unable to reach the aiChat server.');\n"
+           "        searchState.active = false;\n"
+           "        if (enableSearchInput) {\n"
+           "          searchState.requested = enableSearchInput.checked;\n"
+           "        }\n"
+           "        updateSearchHelper();\n"
+           "      }\n"
            "    });\n"
           "    createParticipant('Astra', 'gemma:2b', true);\n"
           "    createParticipant('Nova', 'llama3:8b', true);\n"
@@ -2278,6 +3220,10 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
     size_t participant_count = 0;
     json_object *result = NULL;
     char *error_message = NULL;
+    int search_requested = 0;
+    int search_configured = is_search_configured();
+    int search_enabled = 0;
+    json_object *search_flag_obj = NULL;
 
     memset(participants, 0, sizeof(participants));
     struct json_tokener *tok = json_tokener_new();
@@ -2381,7 +3327,15 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
         participant_count++;
     }
 
+    if (json_object_object_get_ex(payload, "enableSearch", &search_flag_obj) && search_flag_obj) {
+        search_requested = json_object_get_boolean(search_flag_obj);
+    }
+
     json_object_put(payload);
+    search_enabled = search_requested && search_configured;
+    if (search_requested && !search_enabled) {
+        fprintf(stderr, "Web search was requested but no AICHAT_SEARCH_URL is configured.\n");
+    }
 
     int needs_lookup = 0;
     for (size_t i = 0; i < participant_count; ++i) {
@@ -2445,6 +3399,9 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
     json_object_object_add(start_event, "topic", json_object_new_string(topic));
     json_object_object_add(start_event, "turns", json_object_new_int(turns));
     json_object_object_add(start_event, "participants", start_participants);
+    json_object_object_add(start_event, "searchRequested", json_object_new_boolean(search_requested));
+    json_object_object_add(start_event, "searchConfigured", json_object_new_boolean(search_configured));
+    json_object_object_add(start_event, "searchEnabled", json_object_new_boolean(search_enabled));
 
     if (send_json_chunk(client_fd, start_event) != 0) {
         json_object_put(start_event);
@@ -2454,7 +3411,8 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
     json_object_put(start_event);
 
     struct StreamContext stream_ctx = {client_fd, 0};
-    if (run_conversation(topic, turns, participants, participant_count, ollama_url, stream_message_callback,
+    if (run_conversation(topic, turns, participants, participant_count, ollama_url, search_enabled,
+                         stream_message_callback,
                          &stream_ctx, &result, &error_message) != 0) {
         if (!stream_ctx.failed) {
             if (error_message) {
@@ -2479,6 +3437,8 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
             json_object_object_add(complete_event, "type", json_object_new_string("complete"));
             json_object_object_add(complete_event, "topic", json_object_new_string(topic));
             json_object_object_add(complete_event, "turns", json_object_new_int(turns));
+            json_object_object_add(complete_event, "searchEnabled",
+                                   json_object_new_boolean(search_enabled));
             if (send_json_chunk(client_fd, complete_event) != 0) {
                 stream_ctx.failed = 1;
             }
