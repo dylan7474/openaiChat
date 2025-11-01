@@ -17,7 +17,7 @@
 #include "config.h"
 
 /* *** MODIFIED FOR OPEN WEBUI *** */
-#define DEFAULT_OLLAMA_URL "http://127.0.0.1:8080/ollama/api/generate"
+#define DEFAULT_OLLAMA_URL "http://xblade.dylaniones.org:8080/api/chat/completions"
 #define SYSTEM_PROMPT                                                                                 \
     "You are a helpful and creative AI assistant in a conversation with other friendly AI "        \
     "companions. The user has started the conversation with a topic. Engage in a natural, "         \
@@ -410,16 +410,139 @@ static void sanitize_model_response(char *response, const char *participant_name
     trim_trailing_whitespace(response);
 }
 
+static char *duplicate_choice_content(json_object *parsed_json) {
+    json_object *choices = NULL;
+
+    if (!parsed_json) {
+        return NULL;
+    }
+
+    if (!json_object_object_get_ex(parsed_json, "choices", &choices) ||
+        json_object_get_type(choices) != json_type_array) {
+        return NULL;
+    }
+
+    size_t choice_count = json_object_array_length(choices);
+    for (size_t i = 0; i < choice_count; ++i) {
+        json_object *choice = json_object_array_get_idx(choices, i);
+        json_object *message = NULL;
+        json_object *delta = NULL;
+        json_object *content_obj = NULL;
+        const char *content_str = NULL;
+
+        if (choice && json_object_object_get_ex(choice, "message", &message) &&
+            json_object_object_get_ex(message, "content", &content_obj) &&
+            json_object_is_type(content_obj, json_type_string)) {
+            content_str = json_object_get_string(content_obj);
+        } else if (choice && json_object_object_get_ex(choice, "delta", &delta) &&
+                   json_object_object_get_ex(delta, "content", &content_obj) &&
+                   json_object_is_type(content_obj, json_type_string)) {
+            content_str = json_object_get_string(content_obj);
+        }
+
+        if (content_str && *content_str) {
+            return strdup(content_str);
+        }
+    }
+
+    return NULL;
+}
+
+static char *parse_streaming_chunks(const char *payload) {
+    char *combined = NULL;
+    const char *cursor = payload;
+
+    while (cursor && *cursor) {
+        const char *data_marker = strstr(cursor, "data:");
+        const char *line_end = NULL;
+        size_t fragment_len = 0;
+
+        if (!data_marker) {
+            break;
+        }
+
+        data_marker += 5; /* skip "data:" */
+        while (*data_marker == ' ' || *data_marker == '\t') {
+            data_marker++;
+        }
+
+        line_end = strchr(data_marker, '\n');
+        if (line_end) {
+            fragment_len = (size_t)(line_end - data_marker);
+        } else {
+            fragment_len = strlen(data_marker);
+        }
+
+        while (fragment_len > 0 && (data_marker[fragment_len - 1] == '\r')) {
+            fragment_len--;
+        }
+
+        cursor = line_end ? line_end + 1 : data_marker + fragment_len;
+        if (fragment_len == 0) {
+            continue;
+        }
+
+        if (fragment_len == 6 && strncmp(data_marker, "[DONE]", 6) == 0) {
+            continue;
+        }
+
+        char *fragment = strndup(data_marker, fragment_len);
+        json_object *parsed_fragment = NULL;
+        json_object *error_obj = NULL;
+        char *piece = NULL;
+
+        if (!fragment) {
+            free(combined);
+            return NULL;
+        }
+
+        parsed_fragment = json_tokener_parse(fragment);
+        free(fragment);
+        if (!parsed_fragment) {
+            continue;
+        }
+
+        if (json_object_object_get_ex(parsed_fragment, "error", &error_obj)) {
+            const char *error_msg = json_object_get_string(error_obj);
+            if (error_msg) {
+                fprintf(stderr, "Error from AI server: %s\n", error_msg);
+            }
+            json_object_put(parsed_fragment);
+            free(combined);
+            return NULL;
+        }
+
+        piece = duplicate_choice_content(parsed_fragment);
+        json_object_put(parsed_fragment);
+        if (!piece) {
+            continue;
+        }
+
+        char *new_combined = append_to_history(combined, piece);
+        free(piece);
+        if (!new_combined) {
+            free(combined);
+            return NULL;
+        }
+        combined = new_combined;
+    }
+
+    return combined;
+}
+
 static char *parse_ollama_response(const char *json_string) {
     struct json_object *parsed_json = NULL;
     struct json_object *response_obj = NULL;
     struct json_object *error_obj = NULL;
     char *response_text = NULL;
 
+    if (!json_string) {
+        return NULL;
+    }
+
     parsed_json = json_tokener_parse(json_string);
     if (!parsed_json) {
-        fprintf(stderr, "Error: Could not parse JSON response.\n");
-        return NULL;
+        return parse_streaming_chunks(json_string);
     }
 
     if (json_object_object_get_ex(parsed_json, "error", &error_obj)) {
@@ -427,10 +550,14 @@ static char *parse_ollama_response(const char *json_string) {
         if (error_msg) {
             fprintf(stderr, "Error from AI server: %s\n", error_msg);
         }
-    } else if (json_object_object_get_ex(parsed_json, "response", &response_obj)) {
-        const char *response_str = json_object_get_string(response_obj);
-        if (response_str) {
-            response_text = strdup(response_str);
+    } else {
+        response_text = duplicate_choice_content(parsed_json);
+        if (!response_text &&
+            json_object_object_get_ex(parsed_json, "response", &response_obj)) {
+            const char *response_str = json_object_get_string(response_obj);
+            if (response_str) {
+                response_text = strdup(response_str);
+            }
         }
     }
 
@@ -438,7 +565,7 @@ static char *parse_ollama_response(const char *json_string) {
     return response_text;
 }
 
-static char *get_ai_response(const char *full_prompt, const char *model_name,
+static char *get_ai_response(json_object *messages_array, const char *model_name,
                              const char *participant_name, const char *display_label,
                              const char *ollama_url, int web_search_enabled) {
     CURL *curl = NULL;
@@ -460,10 +587,14 @@ static char *get_ai_response(const char *full_prompt, const char *model_name,
         char auth_header[512];
 
         json_object_object_add(jobj, "model", json_object_new_string(model_name));
-        json_object_object_add(jobj, "prompt", json_object_new_string(full_prompt));
-        json_object_object_add(jobj, "stream", json_object_new_boolean(0));
+        json_object_object_add(jobj, "stream", json_object_new_boolean(1));
+        json_object_object_add(jobj, "messages", json_object_get(messages_array));
         if (web_search_enabled) {
-            json_object_object_add(jobj, "web_search", json_object_new_boolean(1));
+            json_object *features = json_object_new_object();
+            json_object_object_add(features, "web_search", json_object_new_boolean(1));
+            json_object_object_add(features, "image_generation", json_object_new_boolean(0));
+            json_object_object_add(features, "code_interpreter", json_object_new_boolean(0));
+            json_object_object_add(jobj, "features", features);
         }
 
         const char *json_payload = json_object_to_json_string(jobj);
@@ -1016,8 +1147,9 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
                             message_callback on_message, void *callback_data, json_object **out_json,
                             char **error_out) {
     char *conversation_history = NULL;
-    json_object *messages = NULL;
+    json_object *result_messages = NULL;
     json_object *participants_json = NULL;
+    json_object *request_messages = NULL;
     json_object *result = NULL;
 
     *out_json = NULL;
@@ -1049,13 +1181,40 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
         return -1;
     }
 
-    messages = json_object_new_array();
+    request_messages = json_object_new_array();
+    result_messages = json_object_new_array();
     participants_json = json_object_new_array();
-    if (!messages || !participants_json) {
+    if (!request_messages || !result_messages || !participants_json) {
         if (error_out) {
             *error_out = strdup("Failed to allocate JSON structures.");
         }
         goto fail;
+    }
+
+    {
+        json_object *system_message = json_object_new_object();
+        json_object *topic_message = json_object_new_object();
+
+        if (!system_message || !topic_message) {
+            if (system_message) {
+                json_object_put(system_message);
+            }
+            if (topic_message) {
+                json_object_put(topic_message);
+            }
+            if (error_out) {
+                *error_out = strdup("Failed to initialize conversation messages.");
+            }
+            goto fail;
+        }
+
+        json_object_object_add(system_message, "role", json_object_new_string("system"));
+        json_object_object_add(system_message, "content", json_object_new_string(SYSTEM_PROMPT));
+        json_object_array_add(request_messages, system_message);
+
+        json_object_object_add(topic_message, "role", json_object_new_string("user"));
+        json_object_object_add(topic_message, "content", json_object_new_string(topic ? topic : ""));
+        json_object_array_add(request_messages, topic_message);
     }
 
     for (size_t p = 0; p < participant_count; ++p) {
@@ -1080,6 +1239,10 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
             char label[128];
             char *response = NULL;
             json_object *message = NULL;
+            json_object *prompt_message = NULL;
+            json_object *assistant_message = NULL;
+            size_t prompt_index = 0;
+            char prompt_content[128];
 
             snprintf(label, sizeof(label), "\n\n%s:", participants[idx].name);
             conversation_history = append_to_history(conversation_history, label);
@@ -1090,15 +1253,39 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
                 goto fail;
             }
 
-            response = get_ai_response(conversation_history, participants[idx].model,
+            prompt_message = json_object_new_object();
+            if (!prompt_message) {
+                if (error_out) {
+                    *error_out = strdup("Failed to allocate prompt message.");
+                }
+                goto fail;
+            }
+
+            snprintf(prompt_content, sizeof(prompt_content), "%s:", participants[idx].name);
+            json_object_object_add(prompt_message, "role", json_object_new_string("user"));
+            json_object_object_add(prompt_message, "content", json_object_new_string(prompt_content));
+            prompt_index = json_object_array_length(request_messages);
+            json_object_array_add(request_messages, prompt_message);
+
+            response = get_ai_response(request_messages, participants[idx].model,
                                        participants[idx].name, participants[idx].display_model,
                                        ollama_url, search_enabled);
             if (!response) {
+                json_object_array_del_idx(request_messages, prompt_index, 1);
                 if (error_out) {
                     char buffer[256];
                     snprintf(buffer, sizeof(buffer), "Model '%.*s' failed to respond.",
                              (int)(sizeof(buffer) - 40), participants[idx].model);
                     *error_out = strdup(buffer);
+                }
+                goto fail;
+            }
+
+            assistant_message = json_object_new_object();
+            if (!assistant_message) {
+                free(response);
+                if (error_out) {
+                    *error_out = strdup("Failed to allocate assistant message.");
                 }
                 goto fail;
             }
@@ -1130,7 +1317,11 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
                                        json_object_new_string(participants[idx].display_model));
             }
             json_object_object_add(message, "text", json_object_new_string(response));
-            json_object_array_add(messages, message);
+            json_object_array_add(result_messages, message);
+
+            json_object_object_add(assistant_message, "role", json_object_new_string("assistant"));
+            json_object_object_add(assistant_message, "content", json_object_new_string(response));
+            json_object_array_add(request_messages, assistant_message);
 
             if (on_message) {
                 json_object_get(message);
@@ -1159,20 +1350,24 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
     json_object_object_add(result, "topic", json_object_new_string(topic));
     json_object_object_add(result, "turns", json_object_new_int(turns));
     json_object_object_add(result, "participants", participants_json);
-    json_object_object_add(result, "messages", messages);
+    json_object_object_add(result, "messages", result_messages);
     json_object_object_add(result, "history", json_object_new_string(conversation_history));
     json_object_object_add(result, "searchEnabled", json_object_new_boolean(search_enabled));
 
+    json_object_put(request_messages);
     free(conversation_history);
     *out_json = result;
     return 0;
 
 fail:
-    if (messages) {
-        json_object_put(messages);
+    if (result_messages) {
+        json_object_put(result_messages);
     }
     if (participants_json) {
         json_object_put(participants_json);
+    }
+    if (request_messages) {
+        json_object_put(request_messages);
     }
     if (result) {
         json_object_put(result);
