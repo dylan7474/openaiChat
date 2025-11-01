@@ -44,8 +44,14 @@ sudo apt-get install -y \
 ### Windows (MinGW / MSYS2 Make)
 1. Launch an MSYS2 or MinGW shell that provides the GNU toolchain and `pkg-config`.
 2. `./configure`
-3. `make -f Makefile.win`
+3. `make -f Makefile.win` (set `CC=x86_64-w64-mingw32-gcc` if you are cross-compiling)
 4. Run the generated `aichat.exe` from the same shell.
+
+The Windows makefile relies on `pkg-config` to resolve the include and linker
+flags for `libcurl` and `json-c`. If the script reports that either package is
+missing, install the corresponding MSYS2 development packages (for example,
+`pacman -S mingw-w64-x86_64-curl mingw-w64-x86_64-json-c`) and retry the
+build.
 
 ## Running the server
 * Before launching the server, provide your Open WebUI API key by editing `config.h` and rebuilding. aiChat now prefers the
