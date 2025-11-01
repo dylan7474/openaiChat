@@ -49,6 +49,7 @@ typedef int (*message_callback)(json_object *message, void *user_data);
 
 static void send_http_response(int client_fd, const char *status, const char *content_type, const char *body);
 static void send_http_error(int client_fd, const char *status, const char *message);
+static void handle_diagnostics_request(int client_fd, const char *ollama_url);
 
 static const char *get_ollama_url(void) {
     const char *env = getenv("OLLAMA_URL");
@@ -626,13 +627,37 @@ static int fetch_models_via_url(const char *models_url, json_object **out_json, 
     curl_global_cleanup();
 
     if (res != CURLE_OK || http_status < 200 || http_status >= 300) {
+        if (res != CURLE_OK) {
+            const char *error_str = curl_easy_strerror(res);
+            fprintf(stderr,
+                    "Model discovery request to %s failed: %s (curl code %d).\n",
+                    models_url, error_str, res);
+            fprintf(stderr,
+                    "Tip: Run `curl%s \"%s\"` from the aiChat host to reproduce the failure.\n",
+                    api_key ? " -H \"Authorization: Bearer <YOUR_WEBUI_API_KEY>\"" : "",
+                    models_url);
+        } else {
+            fprintf(stderr,
+                    "Model discovery request to %s returned HTTP %ld.\n",
+                    models_url, http_status);
+            fprintf(stderr,
+                    "Tip: Run `curl%s -i \"%s\"` to inspect the response directly.\n",
+                    api_key ? " -H \"Authorization: Bearer <YOUR_WEBUI_API_KEY>\"" : "",
+                    models_url);
+        }
+
         free(chunk.memory);
         if (error_out) {
             if (res != CURLE_OK) {
-                *error_out = strdup("Failed to contact Open WebUI for model list.");
+                char buffer[192];
+                snprintf(buffer, sizeof(buffer),
+                         "Failed to contact Open WebUI for model list (curl error: %s).",
+                         curl_easy_strerror(res));
+                *error_out = strdup(buffer);
             } else {
-                char buffer[128];
-                snprintf(buffer, sizeof(buffer), "Open WebUI returned status %ld while listing models.", http_status);
+                char buffer[160];
+                snprintf(buffer, sizeof(buffer),
+                         "Open WebUI returned status %ld while listing models.", http_status);
                 *error_out = strdup(buffer);
             }
         }
@@ -656,6 +681,14 @@ static int fetch_models_via_url(const char *models_url, json_object **out_json, 
     }
 
     if (!models_array || !json_object_is_type(models_array, json_type_array)) {
+        fprintf(stderr,
+                "Model discovery request to %s returned an unexpected payload (first 200 bytes shown): %.200s\n",
+                models_url,
+                chunk.memory ? chunk.memory : "<empty response>");
+        fprintf(stderr,
+                "Tip: Run `curl%s \"%s\"` and review the JSON body.\n",
+                api_key ? " -H \"Authorization: Bearer <YOUR_WEBUI_API_KEY>\"" : "",
+                models_url);
         free(chunk.memory);
         if (parsed) {
             json_object_put(parsed);
@@ -784,11 +817,15 @@ static int fetch_available_models(const char *ollama_url, json_object **out_json
             }
             return 0;
         }
+        if (webui_error) {
+            fprintf(stderr, "Open WebUI model probe failed: %s\n", webui_error);
+        }
     } else {
         webui_error = strdup("Failed to prepare Open WebUI models URL.");
     }
 
     if (fallback_url) {
+        fprintf(stderr, "Falling back to legacy Ollama tags endpoint for model discovery.\n");
         rc = fetch_models_via_url(fallback_url, out_json, &fallback_error);
         free(fallback_url);
         if (rc == 0) {
@@ -839,6 +876,43 @@ static void handle_models_request(int client_fd, const char *ollama_url) {
     if (error_message) {
         free(error_message);
     }
+}
+
+static void handle_diagnostics_request(int client_fd, const char *ollama_url) {
+    json_object *payload = json_object_new_object();
+    char *models_url = NULL;
+    char *fallback_url = NULL;
+    const char *api_endpoint = ollama_url ? ollama_url : "";
+    const char *api_key = get_webui_key();
+
+    if (!payload) {
+        send_http_error(client_fd, "500 Internal Server Error", "Unable to prepare diagnostics payload.");
+        return;
+    }
+
+    json_object_object_add(payload, "webuiEndpoint", json_object_new_string(api_endpoint));
+
+    models_url = build_webui_models_url(ollama_url);
+    if (models_url) {
+        json_object_object_add(payload, "modelsUrl", json_object_new_string(models_url));
+        free(models_url);
+    } else {
+        json_object_object_add(payload, "modelsUrl", json_object_new_string(""));
+    }
+
+    fallback_url = build_ollama_tags_url(ollama_url);
+    if (fallback_url) {
+        json_object_object_add(payload, "fallbackUrl", json_object_new_string(fallback_url));
+        free(fallback_url);
+    } else {
+        json_object_object_add(payload, "fallbackUrl", json_object_new_string(""));
+    }
+
+    json_object_object_add(payload, "usesApiKey", json_object_new_boolean(api_key != NULL));
+
+    const char *json_payload = json_object_to_json_string_ext(payload, JSON_C_TO_STRING_PLAIN);
+    send_http_response(client_fd, "200 OK", "application/json", json_payload);
+    json_object_put(payload);
 }
 
 static const char *lookup_display_model(json_object *models_array, const char *identifier) {
@@ -1316,6 +1390,17 @@ static const char *get_html_page(void) {
            "      100% { opacity: 1; text-shadow: none; }\n"
            "    }\n"
            "    #status:empty { display: none; }\n"
+           "    .connection-diagnostics { margin-top: 0.75rem; border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 16px; background: rgba(15, 23, 42, 0.6); box-shadow: 0 18px 36px rgba(2, 6, 23, 0.4); overflow: hidden; backdrop-filter: blur(12px); transition: border-color 0.3s ease, box-shadow 0.3s ease; }\n"
+           "    .connection-diagnostics summary { cursor: pointer; padding: 0.8rem 1rem; list-style: none; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: rgba(226, 232, 240, 0.85); display: flex; align-items: center; gap: 0.5rem; }\n"
+           "    .connection-diagnostics summary::-webkit-details-marker { display: none; }\n"
+           "    .connection-diagnostics summary::before { content: '\25B8'; display: inline-block; transition: transform 0.3s ease; }\n"
+           "    .connection-diagnostics[open] summary::before { transform: rotate(90deg); }\n"
+           "    .connection-diagnostics summary:focus-visible { outline: none; color: rgba(94, 234, 212, 0.95); }\n"
+           "    .connection-diagnostics .diagnostics-content { padding: 0.75rem 1rem 1rem; border-top: 1px solid rgba(148, 163, 184, 0.25); display: grid; gap: 0.75rem; background: linear-gradient(160deg, rgba(15, 23, 42, 0.85), rgba(30, 41, 59, 0.75)); }\n"
+           "    .connection-diagnostics pre { margin: 0; background: rgba(2, 6, 23, 0.65); border-radius: 12px; padding: 0.75rem 1rem; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.85rem; color: rgba(226, 232, 240, 0.92); overflow-x: auto; box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.25); }\n"
+           "    .connection-diagnostics code { font-family: inherit; }\n"
+           "    .connection-diagnostics.diagnostics-error { border-color: rgba(248, 113, 113, 0.7); box-shadow: 0 20px 45px rgba(248, 113, 113, 0.25); }\n"
+           "    .connection-diagnostics.diagnostics-error summary { color: rgba(254, 202, 202, 0.95); }\n"
            "    #transcript { width: min(960px, 100%); }\n"
            "    .log { white-space: pre-wrap; background: rgba(15, 23, 42, 0.78); padding: clamp(1.25rem, 3vw, 2rem); border-radius: 24px; border: 1px solid rgba(148, 163, 184, 0.25); box-shadow: 0 24px 60px rgba(2, 6, 23, 0.65); backdrop-filter: blur(16px); }\n"
            "    .message { padding: 1rem 1.25rem; border-radius: 16px; margin-bottom: 0.85rem; background: var(--message-bg, rgba(56, 189, 248, 0.12)); border-left: 4px solid var(--message-border, #38bdf8); box-shadow: 0 12px 28px var(--message-glow, rgba(15, 23, 42, 0.6)); color: #f8fafc; opacity: 0; transform: translateY(16px); transition: transform 0.55s cubic-bezier(0.23, 1, 0.32, 1), opacity 0.55s ease, box-shadow 0.55s ease; }\n"
@@ -1351,6 +1436,14 @@ static const char *get_html_page(void) {
            "      </div>\n"
            "      <div id=\"status\"></div>\n"
            "    </div>\n"
+           "    <details id=\"connectionDiagnostics\" class=\"connection-diagnostics\">\n"
+           "      <summary>API troubleshooting tips</summary>\n"
+           "      <div class=\"diagnostics-content\">\n"
+           "        <p id=\"diagnosticsSummary\">aiChat will display connection details here after it inspects the Open WebUI API.</p>\n"
+           "        <pre><code id=\"diagnosticsCurl\">curl http://127.0.0.1:3000/api/models</code></pre>\n"
+           "        <p id=\"diagnosticsNotes\">Run the command above from the machine hosting aiChat to confirm the API responds, then check the terminal for detailed error logs.</p>\n"
+           "      </div>\n"
+           "    </details>\n"
            "  </div>\n"
            "  <div id=\"transcript\" class=\"log\" style=\"display:none;\">\n"
            "    <h2>Conversation transcript</h2>\n"
@@ -1361,25 +1454,38 @@ static const char *get_html_page(void) {
            "    const statusEl = document.getElementById('status');\n"
            "    const connectionFlagEl = document.getElementById('connectionFlag');\n"
            "    const connectionTextEl = connectionFlagEl ? connectionFlagEl.querySelector('.connection-text') : null;\n"
-           "    const MODEL_LOAD_ERROR_MESSAGE = 'Unable to load models from Open WebUI.';\n"
+           "    const diagnosticsDetailsEl = document.getElementById('connectionDiagnostics');\n"
+           "    const diagnosticsSummaryEl = document.getElementById('diagnosticsSummary');\n"
+           "    const diagnosticsCurlEl = document.getElementById('diagnosticsCurl');\n"
+           "    const diagnosticsNotesEl = document.getElementById('diagnosticsNotes');\n"
+           "    const MODEL_LOAD_ERROR_MESSAGE = 'Unable to load models from Open WebUI. Expand the troubleshooting tips below for commands you can try.';\n"
+           "    const MODEL_LOAD_ERROR_KEY = 'model-load-error';\n"
+           "    let diagnosticsInfo = null;\n"
            "    statusEl.addEventListener('animationend', (event) => {\n"
-           "      if (event.animationName === 'statusGlow') {\n"
-           "        statusEl.classList.remove('status-flash');\n"
-           "      }\n"
-           "    });\n"
-           "    function setStatus(message) {\n"
-           "      const text = typeof message === 'string' ? message : (message ? String(message) : '');\n"
-           "      const active = Boolean(text);\n"
-           "      statusEl.textContent = active ? text : '';\n"
-           "      statusEl.classList.toggle('status-active', active);\n"
-           "      if (active) {\n"
-           "        statusEl.classList.remove('status-flash');\n"
-           "        void statusEl.offsetWidth;\n"
-           "        statusEl.classList.add('status-flash');\n"
+            "      if (event.animationName === 'statusGlow') {\n"
+            "        statusEl.classList.remove('status-flash');\n"
+            "      }\n"
+            "    });\n"
+           "    function setStatus(message, key) {\n"
+            "      const text = typeof message === 'string' ? message : (message ? String(message) : '');\n"
+            "      const active = Boolean(text);\n"
+            "      statusEl.textContent = active ? text : '';\n"
+            "      statusEl.classList.toggle('status-active', active);\n"
+           "      if (active && typeof key === 'string' && key) {\n"
+           "        statusEl.dataset.statusKey = key;\n"
+           "      } else if (active) {\n"
+           "        delete statusEl.dataset.statusKey;\n"
            "      } else {\n"
-           "        statusEl.classList.remove('status-flash');\n"
+           "        delete statusEl.dataset.statusKey;\n"
            "      }\n"
-           "    }\n"
+            "      if (active) {\n"
+            "        statusEl.classList.remove('status-flash');\n"
+            "        void statusEl.offsetWidth;\n"
+            "        statusEl.classList.add('status-flash');\n"
+            "      } else {\n"
+            "        statusEl.classList.remove('status-flash');\n"
+            "      }\n"
+            "    }\n"
            "    function setConnectionState(state, message) {\n"
            "      if (!connectionFlagEl || !connectionTextEl) {\n"
            "        return;\n"
@@ -1398,8 +1504,74 @@ static const char *get_html_page(void) {
            "        label = message && typeof message === 'string' && message ? message : 'Checking API...';\n"
            "      }\n"
            "      connectionTextEl.textContent = label;\n"
+           "      if (diagnosticsDetailsEl) {\n"
+           "        diagnosticsDetailsEl.classList.toggle('diagnostics-error', state === 'disconnected');\n"
+           "        if (state === 'disconnected') {\n"
+           "          diagnosticsDetailsEl.open = true;\n"
+           "        }\n"
+           "      }\n"
+           "      updateDiagnosticsPanel(state);\n"
            "    }\n"
            "    setConnectionState('checking');\n"
+           "    function updateDiagnosticsPanel(state) {\n"
+           "      if (!diagnosticsDetailsEl) {\n"
+           "        return;\n"
+           "      }\n"
+           "      const info = diagnosticsInfo || {};\n"
+           "      const modelsUrl = typeof info.modelsUrl === 'string' ? info.modelsUrl.trim() : '';\n"
+           "      const fallbackUrl = typeof info.fallbackUrl === 'string' ? info.fallbackUrl.trim() : '';\n"
+           "      const endpoint = typeof info.webuiEndpoint === 'string' ? info.webuiEndpoint.trim() : '';\n"
+           "      const usesApiKey = Boolean(info.usesApiKey);\n"
+           "      const preferredUrl = modelsUrl || fallbackUrl;\n"
+           "      if (diagnosticsSummaryEl) {\n"
+           "        const parts = [];\n"
+           "        if (modelsUrl) {\n"
+           "          parts.push(`Primary models endpoint: ${modelsUrl}.`);\n"
+           "        } else {\n"
+           "          parts.push('Primary models endpoint could not be derived from the configured URL.');\n"
+           "        }\n"
+           "        if (fallbackUrl && fallbackUrl !== modelsUrl) {\n"
+           "          parts.push(`Legacy fallback endpoint: ${fallbackUrl}.`);\n"
+           "        }\n"
+           "        if (endpoint) {\n"
+           "          parts.push(`Conversations will be sent to: ${endpoint}.`);\n"
+           "        }\n"
+           "        diagnosticsSummaryEl.textContent = parts.join(' ');\n"
+           "      }\n"
+           "      if (diagnosticsCurlEl) {\n"
+           "        const commandParts = ['curl'];\n"
+           "        if (usesApiKey) {\n"
+           "          commandParts.push('-H \"Authorization: Bearer <YOUR_WEBUI_API_KEY>\"');\n"
+           "        }\n"
+           "        if (preferredUrl) {\n"
+           "          commandParts.push(`\"${preferredUrl}\"`);\n"
+           "        } else {\n"
+           "          commandParts.push('\"http://127.0.0.1:3000/api/models\"');\n"
+           "        }\n"
+           "        if (state === 'disconnected') {\n"
+           "          commandParts.push('--verbose');\n"
+           "        }\n"
+           "        diagnosticsCurlEl.textContent = commandParts.join(' ');\n"
+           "      }\n"
+           "      if (diagnosticsNotesEl) {\n"
+           "        const targetHint = preferredUrl || endpoint || 'your Open WebUI host';\n"
+           "        diagnosticsNotesEl.textContent = `Run the command above from the machine hosting aiChat to confirm ${targetHint} is reachable. If it fails, adjust the OLLAMA_URL (currently ${endpoint || 'not set'}) or check your firewall.`;\n"
+           "      }\n"
+           "    }\n"
+           "    async function loadDiagnosticsInfo() {\n"
+           "      try {\n"
+           "        const response = await fetch('/diagnostics');\n"
+           "        if (!response.ok) {\n"
+           "          return;\n"
+           "        }\n"
+           "        diagnosticsInfo = await response.json();\n"
+           "        updateDiagnosticsPanel();\n"
+           "      } catch (error) {\n"
+           "        // Ignore diagnostics fetch errors; the panel will keep its placeholder text.\n"
+           "      }\n"
+           "    }\n"
+           "    updateDiagnosticsPanel();\n"
+           "    loadDiagnosticsInfo();\n"
            "    const messagesEl = document.getElementById('messages');\n"
            "    const transcriptEl = document.getElementById('transcript');\n"
            "    const transcriptMessages = [];\n"
@@ -1807,7 +1979,7 @@ static const char *get_html_page(void) {
            "        const payload = await response.json();\n"
            "        availableModels = Array.isArray(payload.models) ? payload.models : [];\n"
            "        modelLoadError = false;\n"
-           "        if (availableModels.length && statusEl.textContent === MODEL_LOAD_ERROR_MESSAGE) {\n"
+           "        if (availableModels.length && statusEl.dataset.statusKey === MODEL_LOAD_ERROR_KEY) {\n"
            "          setStatus('');\n"
            "        }\n"
            "        if (availableModels.length > 0) {\n"
@@ -1819,8 +1991,8 @@ static const char *get_html_page(void) {
            "        availableModels = [];\n"
            "        modelLoadError = true;\n"
            "        setConnectionState('disconnected', 'API unreachable');\n"
-           "        if (!statusEl.textContent) {\n"
-           "          setStatus(MODEL_LOAD_ERROR_MESSAGE);\n"
+           "        if (!statusEl.textContent || statusEl.dataset.statusKey === MODEL_LOAD_ERROR_KEY) {\n"
+           "          setStatus(MODEL_LOAD_ERROR_MESSAGE, MODEL_LOAD_ERROR_KEY);\n"
            "        }\n"
            "      }\n"
            "      refreshModelSelects();\n"
@@ -2351,6 +2523,8 @@ static void handle_client(int client_fd, const char *ollama_url) {
         send_http_response(client_fd, "200 OK", "text/html; charset=UTF-8", get_html_page());
     } else if (strcmp(method, "GET") == 0 && strcmp(path, "/models") == 0) {
         handle_models_request(client_fd, ollama_url);
+    } else if (strcmp(method, "GET") == 0 && strcmp(path, "/diagnostics") == 0) {
+        handle_diagnostics_request(client_fd, ollama_url);
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/chat") == 0) {
         if (!body) {
             send_http_error(client_fd, "400 Bad Request", "Missing request body.");
@@ -2453,9 +2627,25 @@ int main(void) {
 
     printf("aiChat web server ready on http://127.0.0.1:%d\n", port);
     printf("Using Open WebUI endpoint: %s\n", ollama_url);
+
+    char *diagnostics_models_url = build_webui_models_url(ollama_url);
+    if (diagnostics_models_url) {
+        printf("Model list will be requested from: %s\n", diagnostics_models_url);
+        free(diagnostics_models_url);
+    } else {
+        fprintf(stderr, "Warning: unable to derive Open WebUI models endpoint from %s.\n", ollama_url);
+    }
+
+    char *diagnostics_fallback_url = build_ollama_tags_url(ollama_url);
+    if (diagnostics_fallback_url) {
+        printf("Legacy fallback endpoint: %s\n", diagnostics_fallback_url);
+        free(diagnostics_fallback_url);
+    }
+
     /* *** ADDED FOR OPEN WEBUI *** */
     if (!api_key) {
-        fprintf(stderr, "Warning: WEBUI_API_KEY environment variable is not set. Requests will likely fail.\n");
+        fprintf(stderr,
+                "WEBUI_API_KEY not set; continuing without authentication. Configure it if your server requires a token.\n");
     } else {
         printf("Using Open WebUI API Key: [SET]\n");
     }
